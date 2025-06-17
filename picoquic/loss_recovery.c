@@ -763,7 +763,63 @@ int picoquic_copy_before_retransmit(picoquic_packet_t * old_p,
             if (ret == 0) {
                 if (!frame_is_pure_ack) {
                     if (PICOQUIC_IN_RANGE(old_p->bytes[byte_index], picoquic_frame_type_stream_range_min, picoquic_frame_type_stream_range_max)) {
-                        * add_to_data_repeat_queue = 1;
+                        /* Check if stream data meets deadline for smart retransmission */
+                        if (cnx->deadline_aware_enabled) {
+                            /* Parse the stream frame to get stream ID */
+                            uint64_t stream_id = 0;
+                            uint64_t offset = 0;
+                            size_t data_length = 0;
+                            int fin = 0;
+                            uint8_t* stream_bytes = &old_p->bytes[byte_index];
+                            
+                            if (picoquic_parse_stream_header(stream_bytes, frame_length, 
+                                &stream_id, &offset, &data_length, &fin, NULL) != 0) {
+                                /* Find the stream and check deadline */
+                                picoquic_stream_head_t* stream = picoquic_find_stream(cnx, stream_id);
+                                if (stream != NULL && stream->send_queue != NULL) {
+                                    /* Check if any data in this stream has a deadline */
+                                    picoquic_stream_queue_node_t* node = stream->send_queue;
+                                    uint64_t current_time = picoquic_current_time();
+                                    int can_meet_deadline = 1;
+                                    
+                                    while (node != NULL) {
+                                        if (node->deadline_duration_ms > 0) {
+                                            uint64_t deadline = node->enqueue_time + (node->deadline_duration_ms * 1000);
+                                            /* Estimate retransmission time */
+                                            uint64_t retransmit_time = current_time + old_p->send_path->rtt_sample;
+                                            
+                                            if (retransmit_time > deadline) {
+                                                /* Cannot meet deadline, skip retransmission for hard deadlines */
+                                                if (node->deadline_mode == PICOQUIC_DEADLINE_MODE_HARD) {
+                                                    can_meet_deadline = 0;
+                                                    picoquic_log_app_message(cnx, 
+                                                        "Skipping retransmission for stream %" PRIu64 " - deadline expired", 
+                                                        stream_id);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        node = node->next_stream_data;
+                                    }
+                                    
+                                    if (can_meet_deadline) {
+                                        * add_to_data_repeat_queue = 1;
+                                    } else {
+                                        /* Mark as pure ACK to skip retransmission */
+                                        frame_is_pure_ack = 1;
+                                    }
+                                } else {
+                                    /* No deadline constraints, normal retransmission */
+                                    * add_to_data_repeat_queue = 1;
+                                }
+                            } else {
+                                /* Failed to parse, do normal retransmission */
+                                * add_to_data_repeat_queue = 1;
+                            }
+                        } else {
+                            /* Deadline-aware not enabled, normal retransmission */
+                            * add_to_data_repeat_queue = 1;
+                        }
                     }
                     else {
                         if ((force_queue || frame_length > send_buffer_max_minus_checksum - *length)) {

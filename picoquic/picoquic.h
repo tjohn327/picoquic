@@ -283,7 +283,8 @@ typedef enum {
     picoquic_callback_path_quality_changed, /* Some path quality parameters have changed */
     picoquic_callback_path_address_observed, /* The peer has reported an address for the path */
     picoquic_callback_app_wakeup, /* wakeup timer set by application has expired */
-    picoquic_callback_next_path_allowed /* There are enough path_id and connection ID available for the next path */
+    picoquic_callback_next_path_allowed, /* There are enough path_id and connection ID available for the next path */
+    picoquic_callback_stream_data_discarded /* Stream data discarded due to deadline expiry (partial reliability) */
 } picoquic_call_back_event_t;
 
 typedef struct st_picoquic_tp_prefered_address_t {
@@ -331,6 +332,7 @@ typedef struct st_picoquic_tp_t {
     int address_discovery_mode; /* 0=none, 1=provide only, 2=receive only, 3=both */
     uint64_t max_receive_timestamps_per_ack; /* per draft-smith-quic-receive-ts-02 */
     uint8_t receive_timestamps_exponent; /* per draft-smith-quic-receive-ts-02 */
+    int enable_deadline_aware_streams; /* per draft-tjohn-quic-multipath-dmtp-01 */
 } picoquic_tp_t;
 
 /*
@@ -1367,6 +1369,32 @@ void picoquic_reset_stream_ctx(picoquic_cnx_t* cnx, uint64_t stream_id);
  * The context is used in call backs, so the application can directly process responses.
  */
 int picoquic_add_to_stream_with_ctx(picoquic_cnx_t * cnx, uint64_t stream_id, const uint8_t * data, size_t length, int set_fin, void * app_stream_ctx);
+
+/* Deadline modes for deadline-aware streams per draft-tjohn-quic-multipath-dmtp-01 */
+#define PICOQUIC_DEADLINE_MODE_NONE 0
+#define PICOQUIC_DEADLINE_MODE_SOFT 1
+#define PICOQUIC_DEADLINE_MODE_HARD 2
+
+/* Add data to stream with deadline per draft-tjohn-quic-multipath-dmtp-01 
+ * deadline_duration_ms: relative deadline in milliseconds from send time (0 = no deadline)
+ * deadline_mode: PICOQUIC_DEADLINE_MODE_NONE/SOFT/HARD
+ */
+int picoquic_add_to_stream_with_deadline(picoquic_cnx_t* cnx,
+    uint64_t stream_id, const uint8_t* data, size_t length, int set_fin,
+    uint64_t deadline_duration_ms, uint8_t deadline_mode);
+
+/* Set default deadline duration for a stream per draft-tjohn-quic-multipath-dmtp-01
+ * deadline_duration_ms: relative deadline in milliseconds from when data is sent (0 = no deadline) 
+ * deadline_mode: PICOQUIC_DEADLINE_MODE_NONE/SOFT/HARD
+ * This sets the default deadline for future data added to this stream.
+ */
+int picoquic_set_stream_deadline(picoquic_cnx_t* cnx,
+    uint64_t stream_id, uint64_t deadline_duration_ms, uint8_t deadline_mode);
+
+/* Enable deadline-aware streams for this connection
+ * Returns 0 if successful, -1 if not negotiated by peer
+ */
+int picoquic_enable_deadline_aware_streams(picoquic_cnx_t* cnx);
 
 /* Reset a stream, indicating that no more data will be sent on 
  * that stream and that any data currently queued can be abandoned. */

@@ -951,6 +951,75 @@ const uint8_t* picoquic_skip_stop_sending_frame(const uint8_t* bytes, const uint
     return bytes;
 }
 
+/* Skip DEADLINE_CONTROL frame per draft-tjohn-quic-multipath-dmtp-01 */
+const uint8_t* picoquic_skip_deadline_control_frame(const uint8_t* bytes, const uint8_t* bytes_max)
+{
+    /* Skip frame type (already consumed), stream ID, and deadline */
+    if ((bytes = picoquic_frames_varint_skip(bytes, bytes_max)) != NULL) {
+        bytes = picoquic_frames_varint_skip(bytes, bytes_max);
+    }
+    return bytes;
+}
+
+/* Decode DEADLINE_CONTROL frame per draft-tjohn-quic-multipath-dmtp-01 */
+const uint8_t* picoquic_decode_deadline_control_frame(picoquic_cnx_t* cnx, const uint8_t* bytes, const uint8_t* bytes_max, uint64_t current_time)
+{
+    uint64_t stream_id = 0;
+    uint64_t deadline_ms = 0;
+    
+    /* Decode stream ID */
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &stream_id)) == NULL) {
+        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR, picoquic_frame_type_deadline_control);
+        return NULL;
+    }
+    
+    /* Decode deadline duration in milliseconds */
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &deadline_ms)) == NULL) {
+        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR, picoquic_frame_type_deadline_control);
+        return NULL;
+    }
+    
+    /* Find or create the stream */
+    picoquic_stream_head_t* stream = picoquic_find_stream(cnx, stream_id);
+    if (stream == NULL) {
+        /* Check if stream can be created */
+        if (IS_CLIENT_STREAM_ID(stream_id) == cnx->client_mode) {
+            /* Cannot create peer-initiated stream from DEADLINE_CONTROL frame */
+            picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_STREAM_STATE_ERROR, picoquic_frame_type_deadline_control);
+            return NULL;
+        }
+        
+        stream = picoquic_create_missing_streams(cnx, stream_id, 0);
+        if (stream == NULL) {
+            picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_INTERNAL_ERROR, picoquic_frame_type_deadline_control);
+            return NULL;
+        }
+    }
+    
+    /* Update stream deadline information */
+    stream->default_deadline_duration_ms = deadline_ms;
+    stream->default_deadline_mode = PICOQUIC_DEADLINE_MODE_SOFT; /* Default to soft deadline */
+    
+    /* If stream already has queued data, update deadlines for existing chunks */
+    if (stream->send_queue != NULL && deadline_ms > 0) {
+        picoquic_stream_queue_node_t* node = stream->send_queue;
+        uint64_t now = picoquic_current_time();
+        while (node != NULL) {
+            if (node->deadline_duration_ms == 0) {
+                /* Only update if not already set */
+                node->deadline_duration_ms = deadline_ms;
+                node->enqueue_time = now;
+                node->deadline_mode = PICOQUIC_DEADLINE_MODE_SOFT;
+            }
+            node = node->next_stream_data;
+        }
+    }
+    
+    picoquic_log_app_message(cnx, "Received DEADLINE_CONTROL for stream %" PRIu64 " with deadline %" PRIu64 " ms", 
+        stream_id, deadline_ms);
+    
+    return bytes;
+}
 
 int picoquic_check_stop_sending_needs_repeat(picoquic_cnx_t* cnx, const uint8_t* bytes, size_t bytes_size, int* no_need_to_repeat)
 {
@@ -1071,9 +1140,18 @@ static void picoquic_stream_data_chunk_callback(picoquic_cnx_t* cnx, picoquic_st
     }
 }
 
+/* Forward declaration */
+static void picoquic_check_expired_stream_data(picoquic_cnx_t* cnx, picoquic_stream_head_t* stream, uint64_t current_time);
+
 void picoquic_stream_data_callback(picoquic_cnx_t* cnx, picoquic_stream_head_t* stream)
 {
     picoquic_stream_data_node_t* data;
+    uint64_t current_time = picoquic_current_time();
+    
+    /* Check for expired data first if deadline-aware is enabled */
+    if (cnx->deadline_aware_enabled && stream->default_deadline_duration_ms > 0) {
+        picoquic_check_expired_stream_data(cnx, stream, current_time);
+    }
 
     while ((data = (picoquic_stream_data_node_t*)picosplay_first(&stream->stream_data_tree)) != NULL && data->offset <= stream->consumed_offset) {
         size_t start = (size_t)(stream->consumed_offset - data->offset);
@@ -1090,7 +1168,8 @@ void picoquic_stream_data_callback(picoquic_cnx_t* cnx, picoquic_stream_head_t* 
 
 static int add_chunk_node(picoquic_quic_t * quic, picosplay_tree_t* tree, uint64_t offset,
     size_t length, int is_last_frame, 
-    const uint8_t* bytes, int* chunk_added, picoquic_stream_data_node_t * received_data)
+    const uint8_t* bytes, int* chunk_added, picoquic_stream_data_node_t * received_data,
+    uint64_t current_time, uint64_t deadline_duration_ms, uint8_t deadline_mode)
 {
     int ret = 0;
 
@@ -1108,6 +1187,10 @@ static int add_chunk_node(picoquic_quic_t * quic, picosplay_tree_t* tree, uint64
             memmove(node->data, bytes, length);
             node->offset = offset;
             node->length = length;
+            /* Set deadline information */
+            node->receive_time = current_time;
+            node->deadline_duration_ms = deadline_duration_ms;
+            node->deadline_mode = deadline_mode;
         }
     }
     else {
@@ -1115,6 +1198,10 @@ static int add_chunk_node(picoquic_quic_t * quic, picosplay_tree_t* tree, uint64
         node->bytes = bytes;
         node->offset = offset;
         node->length = length;
+        /* Set deadline information */
+        node->receive_time = current_time;
+        node->deadline_duration_ms = deadline_duration_ms;
+        node->deadline_mode = deadline_mode;
     }
 
     if (node != NULL){
@@ -1127,7 +1214,8 @@ static int add_chunk_node(picoquic_quic_t * quic, picosplay_tree_t* tree, uint64
 
 /* Common code to data stream and crypto hs stream */
 int picoquic_queue_network_input(picoquic_quic_t * quic, picosplay_tree_t* tree, uint64_t consumed_offset,
-    uint64_t frame_data_offset, const uint8_t* bytes, size_t length, int is_last_frame, picoquic_stream_data_node_t* received_data, int* new_data_available)
+    uint64_t frame_data_offset, const uint8_t* bytes, size_t length, int is_last_frame, picoquic_stream_data_node_t* received_data, int* new_data_available,
+    uint64_t current_time, uint64_t deadline_duration_ms, uint8_t deadline_mode)
 {
     const uint64_t input_begin = frame_data_offset;
     const uint64_t input_end = frame_data_offset + length;
@@ -1168,7 +1256,8 @@ int picoquic_queue_network_input(picoquic_quic_t * quic, picosplay_tree_t* tree,
             if (chunk_len > 0) {
                 /* There is a gap between previous and next frame, and it will be at least partially filled */
                 ret = add_chunk_node(quic, tree, chunk_ofs, (size_t)chunk_len, is_last_frame,
-                    bytes + frame_data_offset - input_begin, new_data_available, received_data);
+                    bytes + frame_data_offset - input_begin, new_data_available, received_data,
+                    current_time, deadline_duration_ms, deadline_mode);
             }
 
             frame_data_offset = next->offset + next->length;
@@ -1180,7 +1269,8 @@ int picoquic_queue_network_input(picoquic_quic_t * quic, picosplay_tree_t* tree,
             const uint64_t chunk_ofs = frame_data_offset;
             const uint64_t chunk_len = input_end - frame_data_offset;
             ret = add_chunk_node(quic, tree, chunk_ofs, (size_t)chunk_len, is_last_frame,
-                bytes + frame_data_offset - input_begin, new_data_available, received_data);
+                bytes + frame_data_offset - input_begin, new_data_available, received_data,
+                current_time, deadline_duration_ms, deadline_mode);
         }
     }
 
@@ -1256,8 +1346,13 @@ static int picoquic_stream_network_input(picoquic_cnx_t* cnx, uint64_t stream_id
         } else {
             int new_data_available = 0;
 
+            /* Get stream's deadline information for received data */
+            uint64_t deadline_duration_ms = stream->default_deadline_duration_ms;
+            uint8_t deadline_mode = stream->default_deadline_mode;
+            
             ret = picoquic_queue_network_input(cnx->quic, &stream->stream_data_tree, stream->consumed_offset,
-                offset, bytes, length, is_last_frame, received_data, &new_data_available);
+                offset, bytes, length, is_last_frame, received_data, &new_data_available,
+                current_time, deadline_duration_ms, deadline_mode);
             if (ret != 0) {
                 ret = picoquic_connection_error(cnx, (int64_t)ret, 0);
             }
@@ -1346,18 +1441,15 @@ picoquic_stream_head_t* picoquic_find_ready_stream_path(picoquic_cnx_t* cnx, pic
     picoquic_stream_head_t* first_stream = cnx->first_output_stream;
     picoquic_stream_head_t* stream = first_stream;
     picoquic_stream_head_t* found_stream = NULL;
-
+    picoquic_stream_head_t* earliest_deadline_stream = NULL;
+    uint64_t earliest_deadline = UINT64_MAX;
 
     /* Look for a ready stream */
     while (stream != NULL) {
         int has_data = 0;
         picoquic_stream_head_t* next_stream = stream->next_output_stream;
 
-        if (found_stream != NULL && stream->stream_priority > found_stream->stream_priority) {
-            /* All the streams at that priority level have been examined,
-             * the current selection is validated */
-            break;
-        }
+        /* Check if stream has data to send */
         has_data = (cnx->maxdata_remote > cnx->data_sent && stream->sent_offset < stream->maxdata_remote && (stream->is_active ||
                 (stream->send_queue != NULL && stream->send_queue->length > stream->send_queue->offset) ||
                 (stream->fin_requested && !stream->fin_sent)));
@@ -1365,6 +1457,8 @@ picoquic_stream_head_t* picoquic_find_ready_stream_path(picoquic_cnx_t* cnx, pic
             /* Only consider the streams that meet path affinity requirements */
             has_data = 0;
         }
+        
+        /* First check for urgent actions that take highest precedence */
         if ((stream->reset_requested && !stream->reset_sent) ||
             (stream->stop_sending_requested && !stream->stop_sending_sent)) {
             /* urgent action is needed, this takes precedence over FIFO vs round-robin processing */
@@ -1380,15 +1474,46 @@ picoquic_stream_head_t* picoquic_find_ready_stream_path(picoquic_cnx_t* cnx, pic
                 }
             }
             if (has_data) {
-                /* Something can be sent */
-                if ((stream->stream_priority & 1) != 0) {
-                    /* This priority level requests FIFO processing, so we return the first available stream */
-                    found_stream = stream;
-                    break;
+                /* Check if stream has deadline data */
+                if (cnx->deadline_aware_enabled && stream->send_queue != NULL) {
+                    picoquic_stream_queue_node_t* node = stream->send_queue;
+                    uint64_t effective_deadline = UINT64_MAX;
+                    
+                    /* Find the earliest deadline in this stream's queue */
+                    while (node != NULL && node->offset == 0) {
+                        if (node->deadline_duration_ms > 0) {
+                            uint64_t deadline = node->enqueue_time + (node->deadline_duration_ms * 1000);
+                            if (deadline < effective_deadline) {
+                                effective_deadline = deadline;
+                            }
+                        }
+                        node = node->next_stream_data;
+                    }
+                    
+                    /* If this stream has deadline data and it's earlier than what we've seen */
+                    if (effective_deadline < earliest_deadline) {
+                        earliest_deadline = effective_deadline;
+                        earliest_deadline_stream = stream;
+                    }
                 }
-                else if (found_stream == NULL || stream->last_time_data_sent < found_stream->last_time_data_sent) {
-                    /* Select this stream, but need to check if another stream should go before in round robin order */
-                    found_stream = stream;
+                
+                /* Standard priority-based selection for non-deadline streams */
+                if (earliest_deadline_stream == NULL) {
+                    if (found_stream != NULL && stream->stream_priority > found_stream->stream_priority) {
+                        /* All the streams at that priority level have been examined,
+                         * the current selection is validated */
+                        break;
+                    }
+                    
+                    /* Something can be sent */
+                    if ((stream->stream_priority & 1) != 0) {
+                        /* This priority level requests FIFO processing, so we return the first available stream */
+                        found_stream = stream;
+                    }
+                    else if (found_stream == NULL || stream->last_time_data_sent < found_stream->last_time_data_sent) {
+                        /* Select this stream, but need to check if another stream should go before in round robin order */
+                        found_stream = stream;
+                    }
                 }
             }
         }
@@ -1412,6 +1537,11 @@ picoquic_stream_head_t* picoquic_find_ready_stream_path(picoquic_cnx_t* cnx, pic
         stream = next_stream;
     }
 
+    /* Return the stream with the earliest deadline if deadline-aware is enabled */
+    if (cnx->deadline_aware_enabled && earliest_deadline_stream != NULL) {
+        return earliest_deadline_stream;
+    }
+    
     return found_stream;
 }
 
@@ -1554,6 +1684,99 @@ uint8_t * picoquic_format_blocked_frames(picoquic_cnx_t* cnx, uint8_t* bytes, ui
     }
 
     return bytes;
+}
+
+/* Check and discard expired data for partial reliability 
+ * 
+ * IMPORTANT: This is receiver-side partial reliability which is inherently
+ * limited because the receiver doesn't know the exact send time of data.
+ * According to the DMTP draft, deadlines are "relative time from when the
+ * frame is sent", but this timing information is not transmitted.
+ * 
+ * The primary partial reliability mechanism should be at the sender side
+ * (in loss_recovery.c) where we have exact enqueue times and can make
+ * informed decisions about whether to retransmit data based on:
+ * - Time since enqueue
+ * - Remaining time to deadline  
+ * - Path RTT estimates
+ * 
+ * This receiver-side check uses a conservative approach:
+ * - Estimated send time = receive time - network delay (RTT/2)
+ * - Deadline expiry = estimated send time + deadline duration
+ * - Only discards data if current time > deadline expiry
+ * - Only applies to HARD deadline mode
+ * 
+ * This ensures we don't wrongly discard data that might still be useful,
+ * while preventing indefinite head-of-line blocking from expired data.
+ */
+static void picoquic_check_expired_stream_data(picoquic_cnx_t* cnx, picoquic_stream_head_t* stream, uint64_t current_time)
+{
+    picoquic_stream_data_node_t* data = (picoquic_stream_data_node_t*)picosplay_first(&stream->stream_data_tree);
+    picoquic_stream_data_node_t* next = NULL;
+    
+    /* Only check every 10ms to avoid excessive processing */
+    if (current_time - stream->last_deadline_check_time < 10000) {
+        return;
+    }
+    stream->last_deadline_check_time = current_time;
+    
+    while (data != NULL) {
+        next = (picoquic_stream_data_node_t*)picosplay_next(&data->stream_data_node);
+        
+        /* Check if this data has a deadline and if it has expired */
+        if (data->deadline_duration_ms > 0) {
+            /* Conservative approach: estimated_send_time = receive_time - network_delay
+             * This gives us the latest possible time the data could have been sent
+             */
+            uint64_t estimated_send_time = data->receive_time;
+            
+            /* If we have RTT information, subtract one-way delay estimate */
+            if (cnx->path[0]->rtt_sample > 0) {
+                /* Assume one-way delay is roughly RTT/2 */
+                uint64_t one_way_delay = cnx->path[0]->rtt_sample / 2;
+                if (estimated_send_time > one_way_delay) {
+                    estimated_send_time -= one_way_delay;
+                }
+            }
+            
+            /* Check if deadline has expired: current_time > send_time + deadline */
+            uint64_t deadline_expiry = estimated_send_time + (data->deadline_duration_ms * 1000);
+            
+            if (current_time > deadline_expiry) {
+                /* Data has expired */
+                if (data->deadline_mode == PICOQUIC_DEADLINE_MODE_HARD) {
+                    /* For hard deadlines, discard the data */
+                    if (data->offset == stream->consumed_offset) {
+                        /* This is head-of-line data, advance consumed offset to prevent blocking */
+                        stream->consumed_offset = data->offset + data->length;
+                        stream->bytes_expired += data->length;
+                        
+                        /* Log the deadline miss */
+                        picoquic_log_app_message(cnx, 
+                            "Stream %" PRIu64 ": Discarding expired data at offset %" PRIu64 " (%" PRIu64 " bytes)",
+                            stream->stream_id, data->offset, (uint64_t)data->length);
+                        
+                        /* Notify application of deadline miss if callback available */
+                        if (cnx->callback_fn != NULL) {
+                            /* Use a special event to notify deadline miss */
+                            cnx->callback_fn(cnx, stream->stream_id, NULL, 0, 
+                                picoquic_callback_stream_data_discarded, cnx->callback_ctx, stream->app_stream_ctx);
+                        }
+                    }
+                    
+                    /* Remove the expired data from tree */
+                    picosplay_delete_hint(&stream->stream_data_tree, &data->stream_data_node);
+                } else if (data->deadline_mode == PICOQUIC_DEADLINE_MODE_SOFT) {
+                    /* For soft deadlines, just log but don't discard */
+                    picoquic_log_app_message(cnx, 
+                        "Stream %" PRIu64 ": Soft deadline missed for data at offset %" PRIu64,
+                        stream->stream_id, data->offset);
+                }
+            }
+        }
+        
+        data = next;
+    }
 }
 
 /* handling of stream frames
@@ -2289,6 +2512,7 @@ const uint8_t* picoquic_decode_crypto_hs_frame(picoquic_cnx_t* cnx, const uint8_
 {
     uint64_t offset;
     uint64_t data_length;
+    uint64_t current_time = picoquic_current_time();
     const uint8_t* data_bytes;
 
     if ((bytes = picoquic_parse_crypto_hs_frame(bytes, bytes_max, &offset, &data_length, &data_bytes)) == NULL) {
@@ -2305,7 +2529,7 @@ const uint8_t* picoquic_decode_crypto_hs_frame(picoquic_cnx_t* cnx, const uint8_
             int new_data_available;
             int ret = picoquic_queue_network_input(cnx->quic, &stream->stream_data_tree, stream->consumed_offset,
                 offset, data_bytes, (size_t)data_length, picoquic_is_last_stream_frame(bytes + data_length, bytes_max),
-                received_data, &new_data_available);
+                received_data, &new_data_available, current_time, 0, PICOQUIC_DEADLINE_MODE_NONE);
 
             if (ret != 0) {
                 picoquic_connection_error(cnx, (int64_t)ret, picoquic_frame_type_crypto_hs);
@@ -3401,6 +3625,10 @@ int picoquic_check_frame_needs_repeat(picoquic_cnx_t* cnx, const uint8_t* bytes,
                     /* These frames have a special case processing, tied to path challenge */
                     ret = 0;
                     break;
+                case picoquic_frame_type_deadline_control:
+                    /* DEADLINE_CONTROL frames do not need to be repeated once received */
+                    *no_need_to_repeat = 1;
+                    break;
                 default:
                     *no_need_to_repeat = 0;
                     break;
@@ -4004,7 +4232,7 @@ uint8_t* picoquic_format_ack_frame_in_context(picoquic_cnx_t* cnx, uint8_t* byte
                 uint64_t prev_time = 0;
                 
                 while (sack != NULL && nb_timestamps < max_timestamps && bytes < bytes_max) {
-                    uint64_t start_pn = picoquic_sack_item_range_start(sack);
+                    /* uint64_t start_pn = picoquic_sack_item_range_start(sack); */
                     uint64_t end_pn = picoquic_sack_item_range_end(sack);
                     
                     /* Encode Delta Largest Acknowledged */
@@ -6753,6 +6981,17 @@ int picoquic_decode_frames(picoquic_cnx_t* cnx, picoquic_path_t * path_x, const 
                             ack_needed = 1;
                             bytes = picoquic_decode_observed_address_frame(cnx, bytes, bytes_max, path_x, frame_id64);
                             break;
+                        case picoquic_frame_type_deadline_control:
+                            if (!cnx->deadline_aware_enabled) {
+                                DBG_PRINTF("DEADLINE_CONTROL frame (0x%llx) not negotiated", (unsigned long long)frame_id64);
+                                picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
+                                bytes = NULL;
+                            }
+                            else {
+                                bytes = picoquic_decode_deadline_control_frame(cnx, bytes, bytes_max, current_time);
+                                ack_needed = 1;
+                            }
+                            break;
                         default:
                             /* Not implemented yet! */
                             picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
@@ -7078,6 +7317,10 @@ int picoquic_skip_frame(const uint8_t* bytes, size_t bytes_maxsize, size_t* cons
                 case picoquic_frame_type_observed_address_v4:
                 case picoquic_frame_type_observed_address_v6:
                     bytes = picoquic_skip_observed_address_frame(bytes, bytes_max, frame_id64);
+                    *pure_ack = 0;
+                    break;
+                case picoquic_frame_type_deadline_control:
+                    bytes = picoquic_skip_deadline_control_frame(bytes, bytes_max);
                     *pure_ack = 0;
                     break;
                 default:

@@ -192,6 +192,9 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/qlog_test.c
     picoquictest/quic_tester.c
     picoquictest/receive_timestamp_test.c
+    picoquictest/deadline_aware_test.c
+    picoquictest/deadline_e2e_test.c
+    picoquictest/deadline_partial_reliability_simple_test.c
     picoquictest/sacktest.c
     picoquictest/satellite_test.c
     picoquictest/skip_frame_test.c

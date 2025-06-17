@@ -250,6 +250,11 @@ int picoquic_add_to_stream_with_ctx(picoquic_cnx_t* cnx, uint64_t stream_id,
                 stream_data->length = length;
                 stream_data->offset = 0;
                 stream_data->next_stream_data = NULL;
+                
+                /* Set deadline information from stream's defaults */
+                stream_data->deadline_duration_ms = stream->default_deadline_duration_ms;
+                stream_data->enqueue_time = picoquic_current_time();
+                stream_data->deadline_mode = stream->default_deadline_mode;
 
                 while (next != NULL) {
                     pprevious = &next->next_stream_data;
@@ -276,6 +281,162 @@ int picoquic_add_to_stream(picoquic_cnx_t* cnx, uint64_t stream_id,
     const uint8_t* data, size_t length, int set_fin)
 {
     return picoquic_add_to_stream_with_ctx(cnx, stream_id, data, length, set_fin, NULL);
+}
+
+/* Queue DEADLINE_CONTROL frame to be sent to peer */
+static int picoquic_queue_deadline_control_frame(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms)
+{
+    int ret = 0;
+    uint8_t buffer[32];
+    size_t consumed = 0;
+    
+    /* Format DEADLINE_CONTROL frame */
+    uint8_t* bytes = buffer;
+    uint8_t* bytes_max = buffer + sizeof(buffer);
+    
+    if ((bytes = picoquic_frames_varint_encode(bytes, bytes_max, picoquic_frame_type_deadline_control)) == NULL ||
+        (bytes = picoquic_frames_varint_encode(bytes, bytes_max, stream_id)) == NULL ||
+        (bytes = picoquic_frames_varint_encode(bytes, bytes_max, deadline_ms)) == NULL) {
+        ret = -1;
+    }
+    else {
+        consumed = bytes - buffer;
+        /* Queue as a misc frame */
+        ret = picoquic_queue_misc_frame(cnx, buffer, consumed, 0, picoquic_packet_context_application);
+    }
+    
+    return ret;
+}
+
+/* Add data to stream with deadline per draft-tjohn-quic-multipath-dmtp-01 */
+int picoquic_add_to_stream_with_deadline(picoquic_cnx_t* cnx,
+    uint64_t stream_id, const uint8_t* data, size_t length, int set_fin,
+    uint64_t deadline_duration_ms, uint8_t deadline_mode)
+{
+    int ret = 0;
+    picoquic_stream_head_t* stream = picoquic_find_stream_for_writing(cnx, stream_id, &ret);
+
+    if (ret == 0 && set_fin) {
+        if (stream->fin_requested) {
+            /* app error, notified the fin twice*/
+            if (length > 0) {
+                ret = -1;
+            }
+        } else {
+            stream->fin_requested = 1;
+        }
+    }
+
+    /* If our side has sent RST_STREAM or received STOP_SENDING, we should not send anymore data. */
+    if (ret == 0 && (stream->reset_sent || stream->stop_sending_received)) {
+        ret = -1;
+    }
+
+    if (ret == 0 && length > 0) {
+        picoquic_stream_queue_node_t* stream_data = (picoquic_stream_queue_node_t*)
+            malloc(sizeof(picoquic_stream_queue_node_t));
+        if (stream_data == 0) {
+            ret = -1;
+        } else {
+            stream_data->bytes = (uint8_t*)malloc(length);
+
+            if (stream_data->bytes == NULL) {
+                free(stream_data);
+                stream_data = NULL;
+                ret = -1;
+            } else {
+                picoquic_stream_queue_node_t** pprevious = &stream->send_queue;
+                picoquic_stream_queue_node_t* next = stream->send_queue;
+
+                memcpy(stream_data->bytes, data, length);
+                stream_data->length = length;
+                stream_data->offset = 0;
+                stream_data->next_stream_data = NULL;
+                
+                /* Set per-chunk deadline information */
+                stream_data->deadline_duration_ms = deadline_duration_ms;
+                stream_data->enqueue_time = picoquic_current_time();
+                stream_data->deadline_mode = deadline_mode;
+
+                while (next != NULL) {
+                    pprevious = &next->next_stream_data;
+                    next = next->next_stream_data;
+                }
+
+                *pprevious = stream_data;
+            }
+        }
+
+        picoquic_reinsert_by_wake_time(cnx->quic, cnx, picoquic_get_quic_time(cnx->quic));
+    }
+
+    if (ret == 0) {
+        cnx->nb_bytes_queued += length;
+        stream->is_active = 0;
+        stream->app_stream_ctx = NULL;
+        
+        /* Update stream's default deadline settings */
+        stream->default_deadline_duration_ms = deadline_duration_ms;
+        stream->default_deadline_mode = deadline_mode;
+        
+        /* Send DEADLINE_CONTROL frame if this stream now has deadline and we're ready */
+        if (deadline_duration_ms > 0 && cnx->cnx_state >= picoquic_state_client_ready_start &&
+            cnx->deadline_aware_enabled) {
+            (void)picoquic_queue_deadline_control_frame(cnx, stream_id, deadline_duration_ms);
+        }
+    }
+
+    return ret;
+}
+
+/* Set default deadline duration for a stream per draft-tjohn-quic-multipath-dmtp-01 */
+int picoquic_set_stream_deadline(picoquic_cnx_t* cnx,
+    uint64_t stream_id, uint64_t deadline_duration_ms, uint8_t deadline_mode)
+{
+    int ret = 0;
+    picoquic_stream_head_t* stream = NULL;
+    
+    if (!cnx->deadline_aware_enabled) {
+        return -1; /* Deadline-aware streams not negotiated */
+    }
+    
+    stream = picoquic_find_stream(cnx, stream_id);
+    if (stream == NULL) {
+        /* Create stream if it doesn't exist and we're setting a deadline */
+        if (deadline_duration_ms > 0) {
+            stream = picoquic_create_missing_streams(cnx, stream_id, 0);
+            if (stream == NULL) {
+                return -1;
+            }
+        } else {
+            return -1; /* Can't set deadline on non-existent stream */
+        }
+    }
+    
+    /* Update stream's default deadline settings */
+    stream->default_deadline_duration_ms = deadline_duration_ms;
+    stream->default_deadline_mode = deadline_mode;
+    
+    /* Send DEADLINE_CONTROL frame to peer to notify about deadline capability */
+    if (deadline_duration_ms > 0 && cnx->cnx_state >= picoquic_state_client_ready_start) {
+        ret = picoquic_queue_deadline_control_frame(cnx, stream_id, deadline_duration_ms);
+    }
+    
+    return ret;
+}
+
+
+/* Enable deadline-aware streams for this connection */
+int picoquic_enable_deadline_aware_streams(picoquic_cnx_t* cnx)
+{
+    cnx->local_parameters.enable_deadline_aware_streams = 1;
+    
+    /* If remote parameters are already set and compatible, enable immediately */
+    if (cnx->remote_parameters.enable_deadline_aware_streams) {
+        cnx->deadline_aware_enabled = 1;
+    }
+    
+    return 0;
 }
 
 int picoquic_open_flow_control(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t expected_data_size)

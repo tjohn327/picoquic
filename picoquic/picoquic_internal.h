@@ -99,6 +99,11 @@ extern "C" {
 #define PICOQUIC_DEFAULT_SIMULTANEOUS_LOGS 32
 #define PICOQUIC_DEFAULT_HALF_OPEN_RETRY_THRESHOLD 64
 
+/* Deadline modes for deadline-aware streams per draft-tjohn-quic-multipath-dmtp-01 */
+#define PICOQUIC_DEADLINE_MODE_NONE 0
+#define PICOQUIC_DEADLINE_MODE_SOFT 1
+#define PICOQUIC_DEADLINE_MODE_HARD 2
+
 #define PICOQUIC_PN_RANDOM_MIN 0xffff
 #define PICOQUIC_PN_RANDOM_RANGE 0x10000
 
@@ -167,7 +172,8 @@ typedef enum {
     picoquic_frame_type_paths_blocked = 0x15228c0d,
     picoquic_frame_type_path_cid_blocked = 0x15228c0e,
     picoquic_frame_type_observed_address_v4 = 0x9f81a6,
-    picoquic_frame_type_observed_address_v6 = 0x9f81a7
+    picoquic_frame_type_observed_address_v6 = 0x9f81a7,
+    picoquic_frame_type_deadline_control = 0xff0a006 /* per draft-tjohn-quic-multipath-dmtp-01 */
 } picoquic_frame_type_enum_t;
 
 /* PMTU discovery requirement status */
@@ -366,6 +372,10 @@ typedef struct st_picoquic_stream_data_node_t {
     uint64_t offset;  /* Stream offset of the first octet in "bytes" */
     size_t length;    /* Number of octets in "bytes" */
     const uint8_t* bytes;
+    /* Deadline-aware fields for partial reliability */
+    uint64_t receive_time;         /* When this data was received (microseconds) */
+    uint64_t deadline_duration_ms; /* Relative deadline in milliseconds (0 = no deadline) */
+    uint8_t deadline_mode;         /* 0=none, 1=soft, 2=hard */
     uint8_t data[PICOQUIC_MAX_PACKET_SIZE];
 } picoquic_stream_data_node_t;
 
@@ -376,6 +386,10 @@ typedef struct st_picoquic_stream_queue_node_t {
     uint64_t offset;  /* Stream offset of the first octet in "bytes" */
     size_t length;    /* Number of octets in "bytes" */
     uint8_t* bytes;
+    /* Deadline-aware fields per draft-tjohn-quic-multipath-dmtp-01 */
+    uint64_t deadline_duration_ms;    /* Relative deadline in milliseconds (0 = no deadline) */
+    uint64_t enqueue_time;           /* When this data was queued (microseconds) */
+    uint8_t deadline_mode;           /* 0=none, 1=soft, 2=hard */
 } picoquic_stream_queue_node_t;
 
 /*
@@ -596,6 +610,7 @@ typedef uint64_t picoquic_tp_enum;
 #define picoquic_tp_address_discovery 0x9f81a176 /* per draft-seemann-quic-address-discovery */
 #define picoquic_tp_max_receive_timestamps_per_ack 0xff0a002 /* per draft-smith-quic-receive-ts-02 */
 #define picoquic_tp_receive_timestamps_exponent 0xff0a003 /* per draft-smith-quic-receive-ts-02 */
+#define picoquic_tp_enable_deadline_aware_streams 0xff0a004 /* per draft-tjohn-quic-multipath-dmtp-01 */
 
 /* Callback for converting binary log to quic log at the end of a connection. 
  * This is kept private for now; and will only be set through the "set quic log"
@@ -830,6 +845,12 @@ typedef struct st_picoquic_stream_head_t {
     picoquic_sack_list_t sack_list; /* Track which parts of the stream were acknowledged by the peer */
     /* Stream priority -- lowest is most urgent */
     uint8_t stream_priority;
+    /* Deadline-aware fields per draft-tjohn-quic-multipath-dmtp-01 */
+    uint64_t default_deadline_duration_ms; /* Default deadline duration for new data (0 = no deadline) */
+    uint8_t default_deadline_mode;         /* Default deadline mode for new data */
+    /* Partial reliability tracking */
+    uint64_t last_deadline_check_time;     /* Last time we checked for expired data */
+    uint64_t bytes_expired;                /* Total bytes expired due to deadline miss */
     /* Flags describing the state of the stream */
     unsigned int is_active : 1; /* The application is actively managing data sending through callbacks */
     unsigned int fin_requested : 1; /* Application has requested Fin of sending stream */
@@ -1554,6 +1575,10 @@ typedef struct st_picoquic_cnx_t {
     uint64_t receive_timestamp_basis;
     unsigned int receive_timestamp_enabled : 1;
 
+    /* Deadline-aware scheduling state per draft-tjohn-quic-multipath-dmtp-01 */
+    unsigned int deadline_aware_enabled : 1;          /* Feature flag */
+    uint64_t next_deadline_check;                     /* When to recalculate priorities */
+
     /* Copies of packets received too soon */
     picoquic_stateless_packet_t* first_sooner;
     picoquic_stateless_packet_t* last_sooner;
@@ -1921,6 +1946,7 @@ picoquic_stream_head_t * picoquic_stream_from_node(picosplay_node_t * node);
 void picoquic_insert_output_stream(picoquic_cnx_t* cnx, picoquic_stream_head_t * stream);
 void picoquic_remove_output_stream(picoquic_cnx_t* cnx, picoquic_stream_head_t * stream);
 void picoquic_reorder_output_stream(picoquic_cnx_t* cnx, picoquic_stream_head_t* stream);
+int picoquic_compare_stream_priority(picoquic_stream_head_t * stream, picoquic_stream_head_t * other);
 picoquic_stream_head_t * picoquic_first_stream(picoquic_cnx_t * cnx);
 picoquic_stream_head_t * picoquic_last_stream(picoquic_cnx_t * cnx);
 picoquic_stream_head_t * picoquic_next_stream(picoquic_stream_head_t * stream);
@@ -2090,6 +2116,10 @@ uint8_t* picoquic_prepare_observed_address_frame(uint8_t* bytes, const uint8_t* 
     picoquic_path_t* path_x, picoquic_tuple_t* tuple, uint64_t current_time, uint64_t* next_wake_time,
     int* more_data, int* is_pure_ack);
 void picoquic_update_peer_addr(picoquic_path_t* path_x, const struct sockaddr* peer_addr);
+
+/* Deadline control frame per draft-tjohn-quic-multipath-dmtp-01 */
+const uint8_t* picoquic_decode_deadline_control_frame(picoquic_cnx_t* cnx, const uint8_t* bytes, const uint8_t* bytes_max, uint64_t current_time);
+const uint8_t* picoquic_skip_deadline_control_frame(const uint8_t* bytes, const uint8_t* bytes_max);
 
 int picoquic_skip_frame(const uint8_t* bytes, size_t bytes_max, size_t* consumed, int* pure_ack);
 const uint8_t* picoquic_skip_path_abandon_frame(const uint8_t* bytes, const uint8_t* bytes_max);

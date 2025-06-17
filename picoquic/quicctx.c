@@ -3299,19 +3299,95 @@ picoquic_stream_head_t * picoquic_last_stream(picoquic_cnx_t* cnx)
 #endif
 }
 
+/* Helper function to get earliest deadline from stream's send queue */
+static uint64_t picoquic_get_stream_earliest_deadline(picoquic_stream_head_t* stream, uint64_t current_time) {
+    uint64_t earliest_deadline = 0;
+    picoquic_stream_queue_node_t* queue_node = stream->send_queue;
+    
+    while (queue_node != NULL) {
+        if (queue_node->deadline_duration_ms > 0) {
+            uint64_t absolute_deadline = queue_node->enqueue_time + (queue_node->deadline_duration_ms * 1000);
+            if (earliest_deadline == 0 || absolute_deadline < earliest_deadline) {
+                earliest_deadline = absolute_deadline;
+            }
+        }
+        queue_node = queue_node->next_stream_data;
+    }
+    
+    return earliest_deadline;
+}
+
 int picoquic_compare_stream_priority(picoquic_stream_head_t * stream, picoquic_stream_head_t * other) {
     int ret = 1;
-    if (stream->stream_priority < other->stream_priority) {
-        ret = -1;
+    
+    /* If deadline-aware streams are enabled, use EDF scheduling */
+    if (stream->cnx && stream->cnx->deadline_aware_enabled) {
+        uint64_t current_time = picoquic_current_time();
+        
+        /* Get earliest deadline from each stream's send queue */
+        uint64_t stream_deadline = picoquic_get_stream_earliest_deadline(stream, current_time);
+        uint64_t other_deadline = picoquic_get_stream_earliest_deadline(other, current_time);
+        
+        /* Deadline streams have priority over non-deadline streams */
+        if (stream_deadline > 0 && other_deadline == 0) {
+            ret = -1; /* stream has deadline, other doesn't */
+        }
+        else if (stream_deadline == 0 && other_deadline > 0) {
+            ret = 1; /* other has deadline, stream doesn't */
+        }
+        else if (stream_deadline > 0 && other_deadline > 0) {
+            /* Both have deadlines - use EDF (Earliest Deadline First) */
+            if (stream_deadline < other_deadline) {
+                ret = -1; /* stream has earlier deadline */
+            }
+            else if (stream_deadline > other_deadline) {
+                ret = 1; /* other has earlier deadline */
+            }
+            else {
+                /* Same deadline - fall back to stream priority then stream ID */
+                if (stream->stream_priority < other->stream_priority) {
+                    ret = -1;
+                }
+                else if (stream->stream_priority == other->stream_priority) {
+                    if (stream->stream_id < other->stream_id) {
+                        ret = -1;
+                    }
+                    else if (stream->stream_id == other->stream_id) {
+                        ret = 0;
+                    }
+                }
+            }
+        }
+        else {
+            /* Neither has deadline - use traditional priority-based scheduling */
+            if (stream->stream_priority < other->stream_priority) {
+                ret = -1;
+            }
+            else if (stream->stream_priority == other->stream_priority) {
+                if (stream->stream_id < other->stream_id) {
+                    ret = -1;
+                }
+                else if (stream->stream_id == other->stream_id) {
+                    ret = 0;
+                }
+            }
+        }
     }
-    else if (stream->stream_priority == other->stream_priority) {
-        if (stream->stream_id < other->stream_id) {
+    else {
+        /* Traditional priority-based scheduling */
+        if (stream->stream_priority < other->stream_priority) {
             ret = -1;
         }
-        else if (stream->stream_id == other->stream_id) {
-            ret = 0;
+        else if (stream->stream_priority == other->stream_priority) {
+            if (stream->stream_id < other->stream_id) {
+                ret = -1;
+            }
+            else if (stream->stream_id == other->stream_id) {
+                ret = 0;
+            }
         }
     }
+    
     return ret;
 }
 
@@ -3491,6 +3567,10 @@ picoquic_stream_head_t* picoquic_create_stream(picoquic_cnx_t* cnx, uint64_t str
         }
 
         stream->stream_priority = cnx->quic->default_stream_priority;
+        
+        /* Initialize deadline-aware fields */
+        stream->default_deadline_duration_ms = 0;
+        stream->default_deadline_mode = PICOQUIC_DEADLINE_MODE_NONE;
 
         picosplay_init_tree(&stream->stream_data_tree, picoquic_stream_data_node_compare, picoquic_stream_data_node_create, picoquic_stream_data_node_delete, picoquic_stream_data_node_value);
 

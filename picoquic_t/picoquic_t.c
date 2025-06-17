@@ -519,7 +519,10 @@ static const picoquic_test_def_t test_table[] = {
     { "config_option_letters", config_option_letters_test },
     { "config_quic", config_quic_test },
     { "config_usage", config_usage_test },
-    { "receive_timestamp", receive_timestamp_test }
+    { "receive_timestamp", receive_timestamp_test },
+    { "deadline_aware", deadline_aware_test },
+    { "deadline_e2e", deadline_e2e_test_suite },
+    { "deadline_partial_reliability", deadline_partial_reliability_simple_test }
     
 };
 

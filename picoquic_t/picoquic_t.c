@@ -518,7 +518,8 @@ static const picoquic_test_def_t test_table[] = {
     { "config_option", config_option_test },
     { "config_option_letters", config_option_letters_test },
     { "config_quic", config_quic_test },
-    { "config_usage", config_usage_test }
+    { "config_usage", config_usage_test },
+    { "receive_timestamp", receive_timestamp_test }
     
 };
 

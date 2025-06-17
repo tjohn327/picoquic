@@ -297,6 +297,7 @@ int satellite_loss_fc_test();
 int satellite_jitter_test();
 int satellite_medium_test();
 int satellite_preemptive_test();
+int receive_timestamp_test();
 int satellite_preemptive_fc_test();
 int satellite_small_test();
 int satellite_small_up_test();
@@ -587,6 +588,7 @@ int quicperf_media_test();
 int quicperf_multi_test();
 int quicperf_overflow_test();
 int cplusplustest();
+int receive_timestamp_test();
 
 #ifdef __cplusplus
 }

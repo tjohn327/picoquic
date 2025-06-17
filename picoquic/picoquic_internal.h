@@ -594,6 +594,8 @@ typedef uint64_t picoquic_tp_enum;
 #define picoquic_tp_enable_bdp_frame 0xebd9 /* per draft-kuhn-quic-0rtt-bdp-09 */
 #define picoquic_tp_initial_max_path_id 0x0f739bbc1b666d0dull /* per draft quic multipath 13 */ 
 #define picoquic_tp_address_discovery 0x9f81a176 /* per draft-seemann-quic-address-discovery */
+#define picoquic_tp_max_receive_timestamps_per_ack 0xff0a002 /* per draft-smith-quic-receive-ts-02 */
+#define picoquic_tp_receive_timestamps_exponent 0xff0a003 /* per draft-smith-quic-receive-ts-02 */
 
 /* Callback for converting binary log to quic log at the end of a connection. 
  * This is kept private for now; and will only be set through the "set quic log"
@@ -1547,6 +1549,10 @@ typedef struct st_picoquic_cnx_t {
     uint64_t ack_gap_remote;
     uint64_t ack_delay_remote;
     uint64_t ack_reordering_threshold_remote;
+
+    /* Receive timestamp basis for draft-smith-quic-receive-ts-02 */
+    uint64_t receive_timestamp_basis;
+    unsigned int receive_timestamp_enabled : 1;
 
     /* Copies of packets received too soon */
     picoquic_stateless_packet_t* first_sooner;

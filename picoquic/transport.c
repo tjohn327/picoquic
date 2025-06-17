@@ -441,6 +441,16 @@ int picoquic_prepare_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
             cnx->local_parameters.enable_time_stamp);
     }
 
+    if (cnx->local_parameters.max_receive_timestamps_per_ack > 0 && bytes != NULL) {
+        bytes = picoquic_transport_param_type_varint_encode(bytes, bytes_max, picoquic_tp_max_receive_timestamps_per_ack,
+            cnx->local_parameters.max_receive_timestamps_per_ack);
+    }
+
+    if (cnx->local_parameters.receive_timestamps_exponent > 0 && bytes != NULL) {
+        bytes = picoquic_transport_param_type_varint_encode(bytes, bytes_max, picoquic_tp_receive_timestamps_exponent,
+            cnx->local_parameters.receive_timestamps_exponent);
+    }
+
     if (cnx->local_parameters.do_grease_quic_bit && bytes != NULL) {
         bytes = picoquic_transport_param_type_flag_encode(bytes, bytes_max, picoquic_tp_grease_quic_bit);
     }
@@ -757,6 +767,24 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
                     }
                     break;
                 }
+                case picoquic_tp_max_receive_timestamps_per_ack: {
+                    cnx->remote_parameters.max_receive_timestamps_per_ack =
+                        picoquic_transport_param_varint_decode(cnx, bytes + byte_index, extension_length, &ret);
+                    break;
+                }
+                case picoquic_tp_receive_timestamps_exponent: {
+                    uint64_t exponent =
+                        picoquic_transport_param_varint_decode(cnx, bytes + byte_index, extension_length, &ret);
+                    if (ret == 0) {
+                        if (exponent > 20) {
+                            ret = picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PARAMETER_ERROR, 0);
+                        }
+                        else {
+                            cnx->remote_parameters.receive_timestamps_exponent = (uint8_t)exponent;
+                        }
+                    }
+                    break;
+                }
                 case picoquic_tp_grease_quic_bit:
                     if (extension_length != 0) {
                         ret = picoquic_connection_error_ex(cnx, PICOQUIC_TRANSPORT_PARAMETER_ERROR, 0, "Grease TP");
@@ -976,6 +1004,17 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
     /* ACK Frequency is only enabled on server if negotiated by client */
     if (!cnx->client_mode && !cnx->is_ack_frequency_negotiated) {
         cnx->local_parameters.min_ack_delay = 0;
+    }
+
+    /* Enable receive timestamps if negotiated */
+    if (cnx->remote_parameters.max_receive_timestamps_per_ack > 0 && 
+        cnx->local_parameters.max_receive_timestamps_per_ack > 0) {
+        cnx->receive_timestamp_enabled = 1;
+        /* Initialize receive timestamp basis to current time minus a small offset
+         * to ensure all timestamps are positive */
+        if (cnx->receive_timestamp_basis == 0) {
+            cnx->receive_timestamp_basis = cnx->start_time;
+        }
     }
 
     *consumed = byte_index;

@@ -588,6 +588,7 @@ int quicperf_multi_test();
 int quicperf_overflow_test();
 int cplusplustest();
 int receive_timestamp_test();
+int deadline_aware_test();
 
 #ifdef __cplusplus
 }

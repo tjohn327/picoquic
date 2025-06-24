@@ -208,6 +208,51 @@ int picoquic_mark_high_priority_stream(picoquic_cnx_t * cnx, uint64_t stream_id,
     return ret;
 }
 
+/* Deadline-aware stream API implementations */
+int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms)
+{
+    int ret = 0;
+    
+    /* Check if deadline-aware streams are enabled */
+    if (!cnx->local_parameters.enable_deadline_aware_streams || 
+        !cnx->remote_parameters.enable_deadline_aware_streams) {
+        return PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION;
+    }
+    
+    /* Find or create the stream */
+    picoquic_stream_head_t* stream = picoquic_find_stream_for_writing(cnx, stream_id, &ret);
+    
+    if (ret == 0) {
+        /* Set the deadline */
+        stream->deadline_ms = deadline_ms;
+        stream->deadline_set_time = picoquic_get_quic_time(cnx->quic);
+        
+        /* Queue the DEADLINE_CONTROL frame */
+        /* For now, we'll need to send it during packet preparation */
+        /* The frame will be sent when preparing packets */
+        cnx->next_wake_time = picoquic_get_quic_time(cnx->quic);
+    }
+    
+    return ret;
+}
+
+uint64_t picoquic_get_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id)
+{
+    picoquic_stream_head_t* stream = picoquic_find_stream(cnx, stream_id);
+    
+    if (stream != NULL) {
+        return stream->deadline_ms;
+    }
+    
+    return 0;
+}
+
+int picoquic_is_deadline_aware_enabled(picoquic_cnx_t* cnx)
+{
+    return (cnx->local_parameters.enable_deadline_aware_streams && 
+            cnx->remote_parameters.enable_deadline_aware_streams);
+}
+
 int picoquic_add_to_stream_with_ctx(picoquic_cnx_t* cnx, uint64_t stream_id,
     const uint8_t* data, size_t length, int set_fin, void * app_stream_ctx)
 {

@@ -331,6 +331,7 @@ typedef struct st_picoquic_tp_t {
     int address_discovery_mode; /* 0=none, 1=provide only, 2=receive only, 3=both */
     uint64_t max_receive_timestamps_per_ack; /* per draft-smith-quic-receive-ts-02 */
     uint64_t receive_timestamps_exponent; /* per draft-smith-quic-receive-ts-02 */
+    int enable_deadline_aware_streams; /* 0=disabled, 1=enabled, per draft-tjohn-quic-multipath-dmtp-01 */
 } picoquic_tp_t;
 
 /*
@@ -1305,6 +1306,16 @@ void picoquic_set_default_priority(picoquic_quic_t* quic, uint8_t default_stream
 
 /* Set the priority level of a stream. */
 int picoquic_set_stream_priority(picoquic_cnx_t* cnx, uint64_t stream_id, uint8_t stream_priority);
+
+/* Deadline-aware stream APIs */
+/* Set deadline for a stream (relative time in milliseconds) */
+int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms);
+
+/* Get deadline for a stream (returns 0 if not set) */
+uint64_t picoquic_get_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id);
+
+/* Check if deadline-aware streams are enabled for connection */
+int picoquic_is_deadline_aware_enabled(picoquic_cnx_t* cnx);
 
 int picoquic_mark_high_priority_stream(picoquic_cnx_t* cnx,
     uint64_t stream_id, int is_high_priority);

@@ -3491,6 +3491,21 @@ void picoquic_process_ack_of_frames(picoquic_cnx_t* cnx, picoquic_packet_t* p,
             cnx->is_handshake_done_acked = 1;
             byte_index += l_ftype;
             break;
+        case picoquic_frame_type_deadline_control:
+            /* Deadline control frame acknowledged - just skip it */
+            {
+                uint64_t stream_id = 0;
+                uint64_t deadline_ms = 0;
+                size_t consumed = l_ftype;
+                const uint8_t* bytes = &p->bytes[byte_index + consumed];
+                
+                if ((bytes = picoquic_frames_varint_decode(bytes, &p->bytes[p->length], &stream_id)) != NULL &&
+                    (bytes = picoquic_frames_varint_decode(bytes, &p->bytes[p->length], &deadline_ms)) != NULL) {
+                    consumed = bytes - &p->bytes[byte_index];
+                }
+                byte_index += consumed;
+            }
+            break;
         case picoquic_frame_type_new_connection_id:
             ret = picoquic_process_ack_of_new_cid_frame(cnx, &p->bytes[byte_index], p->length - byte_index, 0, &frame_length);
             byte_index += frame_length;
@@ -4996,6 +5011,73 @@ int picoquic_queue_handshake_done_frame(picoquic_cnx_t* cnx)
             &frame_buffer, 1, 0, picoquic_packet_context_application);
 }
 
+/* Handling of deadline control frames
+ * per draft-tjohn-quic-multipath-dmtp-01
+ */
+
+const uint8_t* picoquic_decode_deadline_control_frame(picoquic_cnx_t* cnx, const uint8_t* bytes, const uint8_t* bytes_max)
+{
+    uint64_t stream_id = 0;
+    uint64_t deadline_ms = 0;
+
+    /* Skip the frame type */
+    bytes++;
+
+    /* Check if deadline-aware streams are enabled */
+    if (!cnx->remote_parameters.enable_deadline_aware_streams) {
+        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, 
+            picoquic_frame_type_deadline_control);
+        return NULL;
+    }
+
+    /* Decode stream ID */
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &stream_id)) == NULL) {
+        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,
+            picoquic_frame_type_deadline_control);
+        return NULL;
+    }
+
+    /* Decode deadline */
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &deadline_ms)) == NULL) {
+        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,
+            picoquic_frame_type_deadline_control);
+        return NULL;
+    }
+
+    /* Find or create the stream */
+    picoquic_stream_head_t* stream = picoquic_find_or_create_stream(cnx, stream_id, 1);
+    if (stream == NULL) {
+        /* Error already set by find_or_create_stream */
+        return NULL;
+    }
+
+    /* Set the deadline */
+    stream->deadline_ms = deadline_ms;
+    stream->deadline_set_time = picoquic_get_quic_time(cnx->quic);
+
+    return bytes;
+}
+
+const uint8_t* picoquic_skip_deadline_control_frame(const uint8_t* bytes, const uint8_t* bytes_max)
+{
+    /* Skip frame type */
+    bytes++;
+    
+    /* Skip stream ID */
+    uint64_t stream_id = 0;
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &stream_id)) == NULL) {
+        return NULL;
+    }
+    
+    /* Skip deadline */
+    uint64_t deadline_ms = 0;
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &deadline_ms)) == NULL) {
+        return NULL;
+    }
+    
+    return bytes;
+}
+
 /* Handling of datagram frames.
  * We follow the spec in
  * https://datatracker.ietf.org/doc/html/draft-ietf-quic-datagram
@@ -5401,6 +5483,56 @@ uint8_t* picoquic_format_ack_frequency_frame(picoquic_cnx_t* cnx, uint8_t* bytes
         }
     }
     return bytes;
+}
+
+/* Deadline control frame formatting 
+ * per draft-tjohn-quic-multipath-dmtp-01
+ */
+uint8_t* picoquic_format_deadline_control_frame(uint8_t* bytes, uint8_t* bytes_max, 
+    uint64_t stream_id, uint64_t deadline_ms, int* more_data, int* is_pure_ack)
+{
+    uint8_t* bytes0 = bytes;
+    
+    if ((bytes = picoquic_frames_varint_encode(bytes, bytes_max, picoquic_frame_type_deadline_control)) != NULL &&
+        (bytes = picoquic_frames_varint_encode(bytes, bytes_max, stream_id)) != NULL &&
+        (bytes = picoquic_frames_varint_encode(bytes, bytes_max, deadline_ms)) != NULL) {
+        *is_pure_ack = 0;
+    }
+    else {
+        *more_data = 1;
+        bytes = bytes0;
+    }
+    
+    return bytes;
+}
+
+int picoquic_queue_deadline_control_frame(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms)
+{
+    int ret = 0;
+    uint8_t frame_buffer[64]; /* Deadline control frame is small */
+    int more_data = 0;
+    int is_pure_ack = 1;
+    
+    /* Check if deadline-aware streams are enabled */
+    if (!cnx->local_parameters.enable_deadline_aware_streams || 
+        !cnx->remote_parameters.enable_deadline_aware_streams) {
+        ret = PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION;
+    }
+    else {
+        uint8_t* bytes_next = picoquic_format_deadline_control_frame(frame_buffer, 
+            frame_buffer + sizeof(frame_buffer), stream_id, deadline_ms, &more_data, &is_pure_ack);
+        
+        if (bytes_next > frame_buffer && !more_data) {
+            size_t consumed = bytes_next - frame_buffer;
+            ret = picoquic_queue_misc_or_dg_frame(cnx, &cnx->first_datagram, &cnx->last_datagram,
+                frame_buffer, consumed, 1, picoquic_packet_context_application);
+        }
+        else {
+            ret = PICOQUIC_ERROR_FRAME_BUFFER_TOO_SMALL;
+        }
+    }
+    
+    return ret;
 }
 
 /* Immediate ACK frame
@@ -6715,6 +6847,11 @@ int picoquic_decode_frames(picoquic_cnx_t* cnx, picoquic_path_t * path_x, const 
                             ack_needed = 1;
                             bytes = picoquic_decode_observed_address_frame(cnx, bytes, bytes_max, path_x, frame_id64);
                             break;
+                        case picoquic_frame_type_deadline_control:
+                            /* Deadline control frames need to be retransmitted if lost */
+                            ack_needed = 1;
+                            bytes = picoquic_decode_deadline_control_frame(cnx, bytes0, bytes_max);
+                            break;
                         default:
                             /* Not implemented yet! */
                             picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
@@ -7040,6 +7177,10 @@ int picoquic_skip_frame(const uint8_t* bytes, size_t bytes_maxsize, size_t* cons
                 case picoquic_frame_type_observed_address_v4:
                 case picoquic_frame_type_observed_address_v6:
                     bytes = picoquic_skip_observed_address_frame(bytes, bytes_max, frame_id64);
+                    *pure_ack = 0;
+                    break;
+                case picoquic_frame_type_deadline_control:
+                    bytes = picoquic_skip_deadline_control_frame(bytes_before_type, bytes_max);
                     *pure_ack = 0;
                     break;
                 default:

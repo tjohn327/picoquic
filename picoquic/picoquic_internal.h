@@ -167,7 +167,8 @@ typedef enum {
     picoquic_frame_type_paths_blocked = 0x15228c0d,
     picoquic_frame_type_path_cid_blocked = 0x15228c0e,
     picoquic_frame_type_observed_address_v4 = 0x9f81a6,
-    picoquic_frame_type_observed_address_v6 = 0x9f81a7
+    picoquic_frame_type_observed_address_v6 = 0x9f81a7,
+    picoquic_frame_type_deadline_control = 0xff0a005 /* per draft-tjohn-quic-multipath-dmtp-01 */
 } picoquic_frame_type_enum_t;
 
 /* PMTU discovery requirement status */
@@ -596,6 +597,7 @@ typedef uint64_t picoquic_tp_enum;
 #define picoquic_tp_address_discovery 0x9f81a176 /* per draft-seemann-quic-address-discovery */
 #define picoquic_tp_max_receive_timestamps_per_ack 0xff0a002 /* per draft-smith-quic-receive-ts-02 */
 #define picoquic_tp_receive_timestamps_exponent 0xff0a003 /* per draft-smith-quic-receive-ts-02 */
+#define picoquic_tp_enable_deadline_aware_streams 0xff0a004 /* per draft-tjohn-quic-multipath-dmtp-01 */
 
 /* Callback for converting binary log to quic log at the end of a connection. 
  * This is kept private for now; and will only be set through the "set quic log"
@@ -847,6 +849,9 @@ typedef struct st_picoquic_stream_head_t {
     unsigned int stop_sending_signalled : 1; /* After stop sending received from peer, application was notified */
     unsigned int max_stream_updated : 1; /* After stream was closed in both directions, the max stream id number was updated */
     unsigned int stream_data_blocked_sent : 1; /* If stream_data_blocked has been sent to peer, and no data sent on stream since */
+    /* Deadline-aware stream fields */
+    uint64_t deadline_ms; /* Deadline in milliseconds from stream creation, 0 if not set */
+    uint64_t deadline_set_time; /* Time when deadline was set, for calculating absolute deadline */
     unsigned int is_output_stream : 1; /* If stream is listed in the output list */
     unsigned int is_closed : 1; /* Stream is closed, closure is accouted for */
     unsigned int is_discarded : 1; /* There should be no more callback for that stream, the application has discarded it */

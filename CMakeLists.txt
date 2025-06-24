@@ -191,6 +191,7 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/pn2pn64test.c
     picoquictest/qlog_test.c
     picoquictest/quic_tester.c
+    picoquictest/receive_timestamp_test.c
     picoquictest/sacktest.c
     picoquictest/satellite_test.c
     picoquictest/skip_frame_test.c

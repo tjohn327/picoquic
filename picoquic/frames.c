@@ -3807,6 +3807,37 @@ const uint8_t* picoquic_decode_ack_frame(picoquic_cnx_t* cnx, const uint8_t* byt
                 &ack_state, current_time);
         }
     }
+    
+    /* Parse receive timestamps if present and enabled */
+    if (bytes != NULL && cnx->local_parameters.max_receive_timestamps_per_ack > 0 && pc == picoquic_packet_context_application) {
+        uint64_t timestamp_range_count = 0;
+        
+        if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &timestamp_range_count)) != NULL) {
+            /* Process each timestamp range */
+            for (uint64_t r = 0; r < timestamp_range_count && bytes != NULL; r++) {
+                uint64_t delta_largest_ack = 0;
+                uint64_t timestamp_delta_count = 0;
+                
+                if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &delta_largest_ack)) == NULL ||
+                    (bytes = picoquic_frames_varint_decode(bytes, bytes_max, &timestamp_delta_count)) == NULL) {
+                    bytes = NULL;
+                    picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR, ftype);
+                    break;
+                }
+                
+                /* Skip timestamp deltas for now - just consume them */
+                for (uint64_t t = 0; t < timestamp_delta_count && bytes != NULL; t++) {
+                    uint64_t timestamp_delta = 0;
+                    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &timestamp_delta)) == NULL) {
+                        bytes = NULL;
+                        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR, ftype);
+                        break;
+                    }
+                    /* TODO: Process timestamp delta if needed for congestion control */
+                }
+            }
+        }
+    }
 
     return bytes;
 }
@@ -3932,6 +3963,60 @@ uint8_t* picoquic_format_ack_frame_in_context(picoquic_cnx_t* cnx, uint8_t* byte
                 bytes = bytes_ecn;
                 *more_data = 1;
                 *after_stamp = picoquic_frame_type_ack;
+            }
+        }
+        
+        /* Add receive timestamps if enabled */
+        if (bytes > after_stamp && cnx->remote_parameters.max_receive_timestamps_per_ack > 0 && ack_ctx->first_receive_timestamp != NULL) {
+            uint8_t* bytes_ts_start = bytes;
+            uint64_t max_timestamps = cnx->remote_parameters.max_receive_timestamps_per_ack;
+            uint64_t exponent = cnx->remote_parameters.receive_timestamps_exponent;
+            uint64_t timestamp_count = 0;
+            uint8_t* timestamp_count_byte = NULL;
+            
+            /* Encode timestamp range count */
+            if ((bytes = picoquic_frames_varint_encode(bytes, bytes_max, 1)) != NULL) {
+                /* We'll encode all timestamps in a single range for simplicity */
+                /* Delta Largest Acknowledged (0 = same as largest ack) */
+                if ((bytes = picoquic_frames_varint_encode(bytes, bytes_max, 0)) != NULL) {
+                    /* Reserve byte for timestamp delta count */
+                    timestamp_count_byte = bytes++;
+                    
+                    /* Encode timestamps */
+                    picoquic_receive_timestamp_t* ts = ack_ctx->first_receive_timestamp;
+                    uint64_t prev_timestamp = ack_ctx->receive_timestamp_basis;
+                    
+                    while (ts != NULL && timestamp_count < max_timestamps && bytes < bytes_max) {
+                        /* Only include timestamps for packets in the largest ack range */
+                        if (ts->packet_number >= picoquic_sack_item_range_start(last_sack) &&
+                            ts->packet_number <= picoquic_sack_item_range_end(last_sack)) {
+                            
+                            uint64_t delta = (ts->receive_timestamp - prev_timestamp) >> exponent;
+                            uint8_t* bytes_before = bytes;
+                            
+                            if ((bytes = picoquic_frames_varint_encode(bytes, bytes_max, delta)) == NULL) {
+                                bytes = bytes_before;
+                                break;
+                            }
+                            
+                            timestamp_count++;
+                            prev_timestamp = ts->receive_timestamp;
+                        }
+                        ts = ts->next;
+                    }
+                    
+                    if (timestamp_count > 0 && timestamp_count_byte != NULL) {
+                        *timestamp_count_byte = (uint8_t)timestamp_count;
+                    } else {
+                        /* Rollback if no timestamps were encoded */
+                        bytes = bytes_ts_start;
+                    }
+                }
+            }
+            
+            if (bytes == NULL) {
+                bytes = bytes_ts_start;
+                *more_data = 1;
             }
         }
     }

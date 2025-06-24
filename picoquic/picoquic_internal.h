@@ -594,6 +594,8 @@ typedef uint64_t picoquic_tp_enum;
 #define picoquic_tp_enable_bdp_frame 0xebd9 /* per draft-kuhn-quic-0rtt-bdp-09 */
 #define picoquic_tp_initial_max_path_id 0x0f739bbc1b666d0dull /* per draft quic multipath 13 */ 
 #define picoquic_tp_address_discovery 0x9f81a176 /* per draft-seemann-quic-address-discovery */
+#define picoquic_tp_max_receive_timestamps_per_ack 0xff0a002 /* per draft-smith-quic-receive-ts-02 */
+#define picoquic_tp_receive_timestamps_exponent 0xff0a003 /* per draft-smith-quic-receive-ts-02 */
 
 /* Callback for converting binary log to quic log at the end of a connection. 
  * This is kept private for now; and will only be set through the "set quic log"
@@ -916,6 +918,14 @@ typedef struct st_picoquic_packet_context_t {
 * 2: Initial
 * The context holds all the data required to manage acknowledgments
 */
+
+/* Structure to store receive timestamps for packets */
+typedef struct st_picoquic_receive_timestamp_t {
+    struct st_picoquic_receive_timestamp_t* next;
+    uint64_t packet_number;
+    uint64_t receive_timestamp;
+} picoquic_receive_timestamp_t;
+
 typedef struct st_picoquic_ack_context_track_t {
     uint64_t highest_ack_sent; /* picoquic_format_ack_frame */
     uint64_t highest_ack_sent_time; /* picoquic_format_ack_frame */
@@ -939,6 +949,11 @@ typedef struct st_picoquic_ack_context_t {
     uint64_t ecn_ce_total_local; /* picoquic_format_ack_frame */
     /* Flags */
     unsigned int sending_ecn_ack : 1; /* picoquic_format_ack_frame, picoquic_ecn_accounting */
+    
+    /* Receive timestamps per draft-smith-quic-receive-ts-02 */
+    picoquic_receive_timestamp_t* first_receive_timestamp;
+    uint64_t receive_timestamp_basis;
+    unsigned int receive_timestamp_basis_initialized : 1;
 } picoquic_ack_context_t;
 
 /* Local CID.

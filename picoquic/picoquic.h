@@ -329,6 +329,8 @@ typedef struct st_picoquic_tp_t {
     int is_multipath_enabled;
     uint64_t initial_max_path_id;
     int address_discovery_mode; /* 0=none, 1=provide only, 2=receive only, 3=both */
+    uint64_t max_receive_timestamps_per_ack; /* per draft-smith-quic-receive-ts-02 */
+    uint64_t receive_timestamps_exponent; /* per draft-smith-quic-receive-ts-02 */
 } picoquic_tp_t;
 
 /*

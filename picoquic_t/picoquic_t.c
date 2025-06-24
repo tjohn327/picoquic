@@ -510,6 +510,7 @@ static const picoquic_test_def_t test_table[] = {
     { "pn_random", pn_random_test },
     { "port_blocked", port_blocked_test },
     { "cplusplus", cplusplustest },
+    { "receive_timestamp", receive_timestamp_test },
     { "stress", stress_test },
     { "fuzz", fuzz_test },
     { "fuzz_initial", fuzz_initial_test},

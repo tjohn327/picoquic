@@ -2691,6 +2691,9 @@ void picoquic_init_ack_ctx(picoquic_cnx_t* cnx, picoquic_ack_context_t* ack_ctx)
     ack_ctx->act[1].highest_ack_sent = 0;
     ack_ctx->act[1].highest_ack_sent_time = cnx->start_time;
     ack_ctx->act[1].ack_needed = 0;
+    ack_ctx->first_receive_timestamp = NULL;
+    ack_ctx->receive_timestamp_basis = 0;
+    ack_ctx->receive_timestamp_basis_initialized = 0;
 }
 
 void picoquic_init_packet_ctx(picoquic_cnx_t* cnx, picoquic_packet_context_t* pkt_ctx, picoquic_packet_context_enum pc)
@@ -4596,7 +4599,15 @@ void picoquic_delete_misc_or_dg(picoquic_misc_frame_header_t** first, picoquic_m
 void picoquic_clear_ack_ctx(picoquic_ack_context_t* ack_ctx)
 {
     picoquic_sack_list_free(&ack_ctx->sack_list);
-
+    
+    /* Free receive timestamps */
+    picoquic_receive_timestamp_t* ts = ack_ctx->first_receive_timestamp;
+    while (ts != NULL) {
+        picoquic_receive_timestamp_t* next = ts->next;
+        free(ts);
+        ts = next;
+    }
+    ack_ctx->first_receive_timestamp = NULL;
 }
 
 

@@ -289,6 +289,26 @@ int picoquic_record_pn_received(picoquic_cnx_t* cnx,
         }
 
         ret = picoquic_update_sack_list(sack_list, pn64, pn64, current_microsec);
+        
+        /* Store receive timestamp if enabled */
+        if (ret == 0 && cnx->remote_parameters.max_receive_timestamps_per_ack > 0 && pc == picoquic_packet_context_application) {
+            picoquic_ack_context_t* ack_ctx = &cnx->ack_ctx[pc];
+            
+            /* Initialize timestamp basis if not set */
+            if (!ack_ctx->receive_timestamp_basis_initialized) {
+                ack_ctx->receive_timestamp_basis = current_microsec;
+                ack_ctx->receive_timestamp_basis_initialized = 1;
+            }
+            
+            /* Allocate and store timestamp */
+            picoquic_receive_timestamp_t* ts = (picoquic_receive_timestamp_t*)malloc(sizeof(picoquic_receive_timestamp_t));
+            if (ts != NULL) {
+                ts->packet_number = pn64;
+                ts->receive_timestamp = current_microsec;
+                ts->next = ack_ctx->first_receive_timestamp;
+                ack_ctx->first_receive_timestamp = ts;
+            }
+        }
     }
     return ret;
 }

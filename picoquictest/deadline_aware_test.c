@@ -288,6 +288,67 @@ int deadline_control_negotiation_test()
     return ret;
 }
 
+/* Test that DEADLINE_CONTROL frame is actually queued and sent */
+int deadline_control_transmission_test()
+{
+    int ret = 0;
+    picoquic_quic_t* quic = NULL;
+    picoquic_cnx_t* cnx = NULL;
+    uint64_t simulated_time = 0;
+    struct sockaddr_in saddr;
+    
+    memset(&saddr, 0, sizeof(struct sockaddr_in));
+    
+    /* Create minimal test context */
+    quic = picoquic_create(8, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, 0, &simulated_time, NULL, NULL, 0);
+    
+    if (quic == NULL) {
+        ret = -1;
+    } else {
+        cnx = picoquic_create_cnx(quic, 
+            picoquic_null_connection_id, picoquic_null_connection_id,
+            (struct sockaddr*)&saddr, simulated_time,
+            0, "test-sni", "test-alpn", 1);
+        
+        if (cnx == NULL) {
+            ret = -1;
+        }
+    }
+    
+    if (ret == 0) {
+        /* Enable deadline-aware streams on both sides */
+        cnx->local_parameters.enable_deadline_aware_streams = 1;
+        cnx->remote_parameters.enable_deadline_aware_streams = 1;
+        
+        /* Set connection state to allow sending frames */
+        cnx->cnx_state = picoquic_state_ready;
+        
+        /* Set a deadline for stream 4 */
+        ret = picoquic_set_stream_deadline(cnx, 4, 1000);
+        
+        if (ret == 0) {
+            /* Check that datagram queue is not empty (frame was queued) */
+            if (cnx->first_datagram == NULL) {
+                DBG_PRINTF("%s", "DEADLINE_CONTROL frame was not queued\n");
+                ret = -1;
+            } else {
+                DBG_PRINTF("%s", "DEADLINE_CONTROL frame was successfully queued\n");
+            }
+        }
+    }
+    
+    /* Cleanup */
+    if (cnx != NULL) {
+        picoquic_delete_cnx(cnx);
+    }
+    if (quic != NULL) {
+        picoquic_free(quic);
+    }
+    
+    return ret;
+}
+
 /* Main test function */
 int deadline_aware_test()
 {
@@ -332,6 +393,16 @@ int deadline_aware_test()
             DBG_PRINTF("%s", "deadline_control_negotiation_test failed\n");
         } else {
             DBG_PRINTF("%s", "deadline_control_negotiation_test passed\n");
+        }
+    }
+    
+    if (ret == 0) {
+        DBG_PRINTF("%s", "Running deadline_control_transmission_test\n");
+        ret = deadline_control_transmission_test();
+        if (ret != 0) {
+            DBG_PRINTF("%s", "deadline_control_transmission_test failed\n");
+        } else {
+            DBG_PRINTF("%s", "deadline_control_transmission_test passed\n");
         }
     }
     

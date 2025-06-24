@@ -208,6 +208,9 @@ int picoquic_mark_high_priority_stream(picoquic_cnx_t * cnx, uint64_t stream_id,
     return ret;
 }
 
+/* Forward declaration for function in frames.c */
+int picoquic_queue_deadline_control_frame(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms);
+
 /* Deadline-aware stream API implementations */
 int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms)
 {
@@ -222,15 +225,18 @@ int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, uint64
     /* Find or create the stream */
     picoquic_stream_head_t* stream = picoquic_find_stream_for_writing(cnx, stream_id, &ret);
     
-    if (ret == 0) {
+    if (ret == 0 && stream != NULL) {
         /* Set the deadline */
         stream->deadline_ms = deadline_ms;
         stream->deadline_set_time = picoquic_get_quic_time(cnx->quic);
         
         /* Queue the DEADLINE_CONTROL frame */
-        /* For now, we'll need to send it during packet preparation */
-        /* The frame will be sent when preparing packets */
-        cnx->next_wake_time = picoquic_get_quic_time(cnx->quic);
+        ret = picoquic_queue_deadline_control_frame(cnx, stream_id, deadline_ms);
+        
+        if (ret == 0) {
+            /* Wake up the connection to send the frame */
+            cnx->next_wake_time = picoquic_get_quic_time(cnx->quic);
+        }
     }
     
     return ret;

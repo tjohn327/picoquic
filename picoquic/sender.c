@@ -3921,6 +3921,11 @@ int picoquic_prepare_packet_ex(picoquic_cnx_t* cnx,
         ret = picoquic_check_cc_feedback_timer(cnx, &next_wake_time, current_time);
     }
 
+    /* Check stream deadlines if deadline-aware streams are enabled */
+    if (ret == 0 && cnx->deadline_context != NULL && cnx->deadline_context->deadline_aware_enabled) {
+        picoquic_check_stream_deadlines(cnx, current_time);
+    }
+
     if (send_buffer_max < PICOQUIC_ENFORCED_INITIAL_MTU) {
         DBG_PRINTF("Invalid buffer size: %zu", send_buffer_max);
         ret = -1;

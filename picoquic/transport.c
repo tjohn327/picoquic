@@ -1022,6 +1022,12 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
         cnx->local_parameters.min_ack_delay = 0;
     }
 
+    /* Initialize deadline context if deadline-aware streams are negotiated */
+    if (cnx->local_parameters.enable_deadline_aware_streams && 
+        cnx->remote_parameters.enable_deadline_aware_streams) {
+        picoquic_init_deadline_context(cnx);
+    }
+
     *consumed = byte_index;
 
     return ret;

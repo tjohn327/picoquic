@@ -1343,6 +1343,11 @@ const uint8_t* picoquic_decode_stream_frame(picoquic_cnx_t* cnx, const uint8_t* 
 
 picoquic_stream_head_t* picoquic_find_ready_stream_path(picoquic_cnx_t* cnx, picoquic_path_t * path_x)
 {
+    /* Use EDF scheduler if deadline-aware streams are enabled */
+    if (cnx->deadline_context != NULL && cnx->deadline_context->deadline_scheduling_active) {
+        return picoquic_find_ready_stream_edf(cnx, path_x);
+    }
+    
     picoquic_stream_head_t* first_stream = cnx->first_output_stream;
     picoquic_stream_head_t* stream = first_stream;
     picoquic_stream_head_t* found_stream = NULL;
@@ -1756,6 +1761,11 @@ uint8_t * picoquic_format_stream_frame(picoquic_cnx_t* cnx, picoquic_stream_head
                 size_t start_index = 0;
 
                 byte_index = bytes - bytes0;
+
+                /* Skip any dropped data due to expired deadlines */
+                if (stream->deadline_ctx != NULL) {
+                    picoquic_skip_dropped_stream_data(stream);
+                }
 
                 if (stream->send_queue == NULL) {
                     length = 0;

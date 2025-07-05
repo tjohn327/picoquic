@@ -589,6 +589,7 @@ int quicperf_overflow_test();
 int cplusplustest();
 int receive_timestamp_test();
 int deadline_test();
+int deadline_edf_test();
 
 #ifdef __cplusplus
 }

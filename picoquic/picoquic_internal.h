@@ -1997,6 +1997,8 @@ void picoquic_update_max_stream_ID_local(picoquic_cnx_t* cnx, picoquic_stream_he
 /* Deadline-aware stream management */
 void picoquic_deadline_stream_init(picoquic_stream_head_t* stream);
 void picoquic_deadline_stream_free(picoquic_stream_head_t* stream);
+void picoquic_init_deadline_context(picoquic_cnx_t* cnx);
+void picoquic_free_deadline_context(picoquic_cnx_t* cnx);
 int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms, int is_hard);
 int picoquic_queue_deadline_control_frame(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t deadline_ms);
 const uint8_t* picoquic_parse_deadline_control_frame(picoquic_cnx_t* cnx, const uint8_t* bytes, 
@@ -2008,6 +2010,9 @@ int picoquic_can_meet_deadline(picoquic_cnx_t* cnx, picoquic_stream_head_t* stre
 picoquic_path_t* picoquic_select_path_for_deadline(picoquic_cnx_t* cnx,
     picoquic_stream_head_t* stream, uint64_t current_time);
 void picoquic_check_stream_deadlines(picoquic_cnx_t* cnx, uint64_t current_time);
+picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, picoquic_path_t* path_x);
+int picoquic_is_stream_data_dropped(picoquic_stream_head_t* stream, uint64_t offset, uint64_t length);
+void picoquic_skip_dropped_stream_data(picoquic_stream_head_t* stream);
 
 /* Handling of retransmission of frames.
  * When a packet is deemed lost, the code looks at the frames that it contained and

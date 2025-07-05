@@ -332,6 +332,8 @@ typedef struct st_picoquic_tp_t {
     /* Receive timestamps extension per draft-smith-quic-receive-ts-02 */
     uint64_t max_receive_timestamps_per_ack;
     uint8_t receive_timestamps_exponent;
+    /* Deadline aware streams extension per draft-tjohn-quic-multipath-dmtp-01 */
+    uint8_t enable_deadline_aware_streams;
 } picoquic_tp_t;
 
 /*
@@ -1309,6 +1311,17 @@ int picoquic_set_stream_priority(picoquic_cnx_t* cnx, uint64_t stream_id, uint8_
 
 int picoquic_mark_high_priority_stream(picoquic_cnx_t* cnx,
     uint64_t stream_id, int is_high_priority);
+
+/*
+* Deadline-aware streams API
+* 
+* Set a deadline for a stream, indicating when the data should be delivered.
+* The deadline is expressed in milliseconds from the current time.
+* The is_hard parameter indicates whether this is a hard deadline (data is
+* dropped if it cannot meet the deadline) or soft deadline (best effort).
+*/
+int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, 
+    uint64_t deadline_ms, int is_hard);
 
 /* 
 * Handling of datagram priorities

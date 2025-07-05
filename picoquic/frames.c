@@ -6842,6 +6842,17 @@ int picoquic_decode_frames(picoquic_cnx_t* cnx, picoquic_path_t * path_x, const 
                             ack_needed = 1;
                             bytes = picoquic_decode_observed_address_frame(cnx, bytes, bytes_max, path_x, frame_id64);
                             break;
+                        case picoquic_frame_type_deadline_control:
+                            if (!cnx->local_parameters.enable_deadline_aware_streams ||
+                                !cnx->remote_parameters.enable_deadline_aware_streams) {
+                                DBG_PRINTF("DEADLINE_CONTROL frame (0x%x) not negotiated", (int)frame_id64);
+                                picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
+                                bytes = NULL;
+                            } else {
+                                bytes = picoquic_parse_deadline_control_frame(cnx, bytes0, bytes_max, current_time, epoch);
+                                ack_needed = 1;
+                            }
+                            break;
                         default:
                             /* Not implemented yet! */
                             picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
@@ -6899,6 +6910,19 @@ static const uint8_t* picoquic_skip_crypto_hs_frame(const uint8_t* bytes, const 
 {
     if ((bytes = picoquic_frames_varint_skip(bytes+1, bytes_max)) != NULL) {
         bytes = picoquic_frames_length_data_skip(bytes, bytes_max);
+    }
+    return bytes;
+}
+
+/*
+ * Skip deadline control frame
+ */
+static const uint8_t* picoquic_skip_deadline_control_frame(const uint8_t* bytes, const uint8_t* bytes_max)
+{
+    /* Skip stream ID */
+    if ((bytes = picoquic_frames_varint_skip(bytes, bytes_max)) != NULL) {
+        /* Skip deadline */
+        bytes = picoquic_frames_varint_skip(bytes, bytes_max);
     }
     return bytes;
 }
@@ -7167,6 +7191,10 @@ int picoquic_skip_frame(const uint8_t* bytes, size_t bytes_maxsize, size_t* cons
                 case picoquic_frame_type_observed_address_v4:
                 case picoquic_frame_type_observed_address_v6:
                     bytes = picoquic_skip_observed_address_frame(bytes, bytes_max, frame_id64);
+                    *pure_ack = 0;
+                    break;
+                case picoquic_frame_type_deadline_control:
+                    bytes = picoquic_skip_deadline_control_frame(bytes, bytes_max);
                     *pure_ack = 0;
                     break;
                 default:

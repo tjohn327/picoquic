@@ -3261,6 +3261,10 @@ void picoquic_clear_stream(picoquic_stream_head_t* stream)
     }
     picosplay_empty_tree(&stream->stream_data_tree);
     picoquic_sack_list_free(&stream->sack_list);
+    /* Clean up deadline context */
+    if (stream->deadline_ctx != NULL) {
+        picoquic_deadline_stream_free(stream);
+    }
 }
 
 
@@ -3460,6 +3464,7 @@ picoquic_stream_head_t* picoquic_create_stream(picoquic_cnx_t* cnx, uint64_t str
     if (stream != NULL) {
         memset(stream, 0, sizeof(picoquic_stream_head_t));
         picoquic_sack_list_init(&stream->sack_list);
+        stream->deadline_ctx = NULL; /* Explicitly initialize deadline context */
     }
 
     if (stream != NULL){
@@ -4875,6 +4880,12 @@ void picoquic_delete_cnx(picoquic_cnx_t* cnx)
 
         picoquic_unregister_net_icid(cnx);
         picoquic_unregister_net_secret(cnx);
+
+        /* Clean up deadline context */
+        if (cnx->deadline_context != NULL) {
+            free(cnx->deadline_context);
+            cnx->deadline_context = NULL;
+        }
 
         free(cnx);
     }

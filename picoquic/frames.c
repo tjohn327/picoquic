@@ -1075,13 +1075,56 @@ void picoquic_stream_data_callback(picoquic_cnx_t* cnx, picoquic_stream_head_t* 
 {
     picoquic_stream_data_node_t* data;
 
+    /* Check if we need to skip any dropped ranges at the beginning */
+    if (stream->deadline_ctx != NULL && stream->deadline_ctx->receiver_dropped_ranges.ack_tree.root != NULL) {
+        uint64_t skipped_to = picoquic_skip_dropped_ranges(&stream->deadline_ctx->receiver_dropped_ranges, stream->consumed_offset);
+        if (skipped_to > stream->consumed_offset) {
+            /* Notify application about the gap */
+            uint64_t gap_length = skipped_to - stream->consumed_offset;
+            if (cnx->callback_fn != NULL) {
+                (cnx->callback_fn)(cnx, stream->stream_id, (uint8_t*)&gap_length, sizeof(gap_length),
+                    picoquic_callback_stream_gap, cnx->callback_ctx, stream);
+            }
+            stream->consumed_offset = skipped_to;
+        }
+    }
+
     while ((data = (picoquic_stream_data_node_t*)picosplay_first(&stream->stream_data_tree)) != NULL && data->offset <= stream->consumed_offset) {
         size_t start = (size_t)(stream->consumed_offset - data->offset);
         if (data->length >= start) {
             size_t data_length = data->length - start;
+            uint64_t data_end = stream->consumed_offset + data_length;
+            
+            /* Check if there's a gap within this data chunk */
+            if (stream->deadline_ctx != NULL && stream->deadline_ctx->receiver_dropped_ranges.ack_tree.root != NULL) {
+                uint64_t next_dropped = picoquic_skip_dropped_ranges(&stream->deadline_ctx->receiver_dropped_ranges, stream->consumed_offset);
+                if (next_dropped > stream->consumed_offset && next_dropped < data_end) {
+                    /* Deliver data up to the gap */
+                    data_length = (size_t)(next_dropped - stream->consumed_offset);
+                }
+            }
+            
             picoquic_stream_data_chunk_callback(cnx, stream, data->bytes + start, data_length);
+            
+            /* Check if we need to skip a gap after this data */
+            if (stream->deadline_ctx != NULL && stream->deadline_ctx->receiver_dropped_ranges.ack_tree.root != NULL) {
+                uint64_t skipped_to = picoquic_skip_dropped_ranges(&stream->deadline_ctx->receiver_dropped_ranges, stream->consumed_offset);
+                if (skipped_to > stream->consumed_offset) {
+                    /* Notify application about the gap */
+                    uint64_t gap_length = skipped_to - stream->consumed_offset;
+                    if (cnx->callback_fn != NULL) {
+                        (cnx->callback_fn)(cnx, stream->stream_id, (uint8_t*)&gap_length, sizeof(gap_length),
+                            picoquic_callback_stream_gap, cnx->callback_ctx, stream);
+                    }
+                    stream->consumed_offset = skipped_to;
+                }
+            }
         }
-        picosplay_delete_hint(&stream->stream_data_tree, &data->stream_data_node);
+        
+        /* Only delete the node if we've consumed all of it */
+        if (stream->consumed_offset >= data->offset + data->length) {
+            picosplay_delete_hint(&stream->stream_data_tree, &data->stream_data_node);
+        }
     }
 
     /* handle the case where the fin frame does not carry any data */

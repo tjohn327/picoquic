@@ -590,6 +590,7 @@ int cplusplustest();
 int receive_timestamp_test();
 int deadline_test();
 int deadline_edf_test();
+int deadline_partial_reliability_test();
 
 #ifdef __cplusplus
 }

@@ -513,6 +513,7 @@ static const picoquic_test_def_t test_table[] = {
     { "receive_timestamp", receive_timestamp_test },
     { "deadline", deadline_test },
     { "deadline_edf", deadline_edf_test },
+    { "deadline_partial_reliability", deadline_partial_reliability_test },
     { "stress", stress_test },
     { "fuzz", fuzz_test },
     { "fuzz_initial", fuzz_initial_test},

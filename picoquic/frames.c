@@ -6863,6 +6863,17 @@ int picoquic_decode_frames(picoquic_cnx_t* cnx, picoquic_path_t * path_x, const 
                                 ack_needed = 1;
                             }
                             break;
+                        case picoquic_frame_type_stream_data_dropped:
+                            if (!cnx->local_parameters.enable_deadline_aware_streams ||
+                                !cnx->remote_parameters.enable_deadline_aware_streams) {
+                                DBG_PRINTF("STREAM_DATA_DROPPED frame (0x%x) not negotiated", (int)frame_id64);
+                                picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
+                                bytes = NULL;
+                            } else {
+                                bytes = picoquic_parse_stream_data_dropped_frame(cnx, bytes0, bytes_max, current_time);
+                                ack_needed = 1;
+                            }
+                            break;
                         default:
                             /* Not implemented yet! */
                             picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_PROTOCOL_VIOLATION, frame_id64);
@@ -7205,6 +7216,10 @@ int picoquic_skip_frame(const uint8_t* bytes, size_t bytes_maxsize, size_t* cons
                     break;
                 case picoquic_frame_type_deadline_control:
                     bytes = picoquic_skip_deadline_control_frame(bytes, bytes_max);
+                    *pure_ack = 0;
+                    break;
+                case picoquic_frame_type_stream_data_dropped:
+                    bytes = picoquic_skip_stream_data_dropped_frame(bytes, bytes_max);
                     *pure_ack = 0;
                     break;
                 default:

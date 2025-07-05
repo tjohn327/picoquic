@@ -168,7 +168,8 @@ typedef enum {
     picoquic_frame_type_path_cid_blocked = 0x15228c0e,
     picoquic_frame_type_observed_address_v4 = 0x9f81a6,
     picoquic_frame_type_observed_address_v6 = 0x9f81a7,
-    picoquic_frame_type_deadline_control = 0xff0b002 /* per draft-tjohn-quic-multipath-dmtp-01 */
+    picoquic_frame_type_deadline_control = 0xff0b002, /* per draft-tjohn-quic-multipath-dmtp-01 */
+    picoquic_frame_type_stream_data_dropped = 0xff0b003 /* signals dropped data ranges to receiver */
 } picoquic_frame_type_enum_t;
 
 /* PMTU discovery requirement status */
@@ -801,7 +802,8 @@ typedef struct st_picoquic_stream_deadline_t {
     /* Partial reliability tracking */
     uint64_t last_dropped_offset;   /* Last offset dropped due to deadline */
     uint64_t dropped_ranges_count;  /* Number of dropped ranges */
-    picoquic_sack_list_t dropped_ranges; /* SACK-like list of dropped ranges */
+    picoquic_sack_list_t dropped_ranges; /* SACK-like list of dropped ranges at sender */
+    picoquic_sack_list_t receiver_dropped_ranges; /* Ranges dropped by sender, tracked at receiver */
     
     /* Statistics */
     uint64_t bytes_dropped;         /* Total bytes dropped */
@@ -2013,6 +2015,12 @@ void picoquic_check_stream_deadlines(picoquic_cnx_t* cnx, uint64_t current_time)
 picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, picoquic_path_t* path_x);
 int picoquic_is_stream_data_dropped(picoquic_stream_head_t* stream, uint64_t offset, uint64_t length);
 void picoquic_skip_dropped_stream_data(picoquic_stream_head_t* stream);
+int picoquic_queue_stream_data_dropped_frame(picoquic_cnx_t* cnx, uint64_t stream_id,
+    uint64_t offset, uint64_t length);
+const uint8_t* picoquic_parse_stream_data_dropped_frame(picoquic_cnx_t* cnx,
+    const uint8_t* bytes, const uint8_t* bytes_max, uint64_t current_time);
+const uint8_t* picoquic_skip_stream_data_dropped_frame(const uint8_t* bytes, const uint8_t* bytes_max);
+uint64_t picoquic_skip_dropped_ranges(picoquic_sack_list_t* dropped_ranges, uint64_t offset);
 
 /* Handling of retransmission of frames.
  * When a packet is deemed lost, the code looks at the frames that it contained and

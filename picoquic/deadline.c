@@ -20,6 +20,7 @@ void picoquic_deadline_stream_init(picoquic_stream_head_t* stream)
         if (stream->deadline_ctx != NULL) {
             memset(stream->deadline_ctx, 0, sizeof(picoquic_stream_deadline_t));
             picoquic_sack_list_init(&stream->deadline_ctx->dropped_ranges);
+            picoquic_sack_list_init(&stream->deadline_ctx->receiver_dropped_ranges);
         }
     }
 }
@@ -29,6 +30,7 @@ void picoquic_deadline_stream_free(picoquic_stream_head_t* stream)
 {
     if (stream != NULL && stream->deadline_ctx != NULL) {
         picoquic_sack_list_free(&stream->deadline_ctx->dropped_ranges);
+        picoquic_sack_list_free(&stream->deadline_ctx->receiver_dropped_ranges);
         free(stream->deadline_ctx);
         stream->deadline_ctx = NULL;
     }
@@ -170,6 +172,30 @@ uint8_t* picoquic_format_deadline_control_frame(uint8_t* bytes, uint8_t* bytes_m
     }
     
     if ((bytes = picoquic_frames_varint_encode(bytes, bytes_max, deadline_ms)) == NULL) {
+        return NULL;
+    }
+    
+    return bytes;
+}
+
+/* Skip STREAM_DATA_DROPPED frame */
+const uint8_t* picoquic_skip_stream_data_dropped_frame(const uint8_t* bytes, const uint8_t* bytes_max)
+{
+    /* Skip frame type */
+    bytes++;
+    
+    /* Skip stream ID */
+    if ((bytes = picoquic_frames_varint_skip(bytes, bytes_max)) == NULL) {
+        return NULL;
+    }
+    
+    /* Skip offset */
+    if ((bytes = picoquic_frames_varint_skip(bytes, bytes_max)) == NULL) {
+        return NULL;
+    }
+    
+    /* Skip length */
+    if ((bytes = picoquic_frames_varint_skip(bytes, bytes_max)) == NULL) {
         return NULL;
     }
     
@@ -333,6 +359,10 @@ void picoquic_check_stream_deadlines(picoquic_cnx_t* cnx, uint64_t current_time)
                             dropped_offset_start, dropped_offset_end, current_time);
                         
                         stream->deadline_ctx->bytes_dropped += dropped_bytes;
+                        
+                        /* Queue STREAM_DATA_DROPPED frame to inform receiver */
+                        picoquic_queue_stream_data_dropped_frame(cnx, stream->stream_id,
+                            dropped_offset_start, dropped_bytes);
                     }
                     
                     stream->deadline_ctx->deadlines_missed++;
@@ -558,4 +588,116 @@ void picoquic_skip_dropped_stream_data(picoquic_stream_head_t* stream)
 next_node:
         ; /* Empty statement for label */
     }
+}
+
+/* Queue a STREAM_DATA_DROPPED frame for transmission */
+int picoquic_queue_stream_data_dropped_frame(picoquic_cnx_t* cnx, uint64_t stream_id,
+    uint64_t offset, uint64_t length)
+{
+    int ret = 0;
+    size_t frame_size = 1 + /* frame type */
+                       picoquic_encode_varint_length(stream_id) +
+                       picoquic_encode_varint_length(offset) +
+                       picoquic_encode_varint_length(length);
+    
+    uint8_t* frame_buffer = (uint8_t*)malloc(frame_size);
+    if (frame_buffer == NULL) {
+        ret = -1;
+    } else {
+        uint8_t* bytes = frame_buffer;
+        uint8_t* bytes_max = frame_buffer + frame_size;
+        
+        /* Encode the frame */
+        *bytes++ = (uint8_t)picoquic_frame_type_stream_data_dropped;
+        bytes = picoquic_frames_varint_encode(bytes, bytes_max, stream_id);
+        bytes = picoquic_frames_varint_encode(bytes, bytes_max, offset);
+        bytes = picoquic_frames_varint_encode(bytes, bytes_max, length);
+        
+        /* Queue as misc frame for reliable delivery */
+        ret = picoquic_queue_misc_frame(cnx, frame_buffer, frame_size, 0, picoquic_packet_context_application);
+        
+        if (ret != 0) {
+            free(frame_buffer);
+        }
+    }
+    
+    return ret;
+}
+
+/* Parse STREAM_DATA_DROPPED frame */
+const uint8_t* picoquic_parse_stream_data_dropped_frame(picoquic_cnx_t* cnx,
+    const uint8_t* bytes, const uint8_t* bytes_max, uint64_t current_time)
+{
+    uint64_t stream_id = 0;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+    
+    /* Skip frame type */
+    bytes++;
+    
+    /* Parse stream ID, offset, and length */
+    if ((bytes = picoquic_frames_varint_decode(bytes, bytes_max, &stream_id)) == NULL ||
+        (bytes = picoquic_frames_varint_decode(bytes, bytes_max, &offset)) == NULL ||
+        (bytes = picoquic_frames_varint_decode(bytes, bytes_max, &length)) == NULL) {
+        picoquic_connection_error(cnx, PICOQUIC_TRANSPORT_FRAME_FORMAT_ERROR,
+            picoquic_frame_type_stream_data_dropped);
+        return NULL;
+    }
+    
+    /* Find or create stream */
+    picoquic_stream_head_t* stream = picoquic_find_stream(cnx, stream_id);
+    if (stream == NULL) {
+        stream = picoquic_create_missing_streams(cnx, stream_id, 1); /* is_remote = 1 */
+        if (stream == NULL) {
+            return NULL; /* Error already set */
+        }
+    }
+    
+    /* Initialize deadline context if needed */
+    if (stream->deadline_ctx == NULL) {
+        picoquic_deadline_stream_init(stream);
+    }
+    
+    if (stream->deadline_ctx != NULL) {
+        /* Record the dropped range */
+        picoquic_update_sack_list(&stream->deadline_ctx->receiver_dropped_ranges,
+            offset, offset + length, current_time);
+        
+        /* Mark that we need to check if more data can be delivered */
+        stream->is_output_stream = 1;
+    }
+    
+    return bytes;
+}
+
+/* Skip over dropped ranges to find next valid offset */
+uint64_t picoquic_skip_dropped_ranges(picoquic_sack_list_t* dropped_ranges, uint64_t offset)
+{
+    if (dropped_ranges == NULL || dropped_ranges->ack_tree.root == NULL) {
+        return offset;
+    }
+    
+    picosplay_node_t* node = picosplay_first(&dropped_ranges->ack_tree);
+    
+    while (node != NULL) {
+        picoquic_sack_item_t* dropped = (picoquic_sack_item_t*)((char*)node - offsetof(struct st_picoquic_sack_item_t, node));
+        
+        if (dropped->end_of_sack_range <= offset) {
+            /* This dropped range is before our offset */
+            node = picosplay_next(node);
+            continue;
+        }
+        
+        if (dropped->start_of_sack_range <= offset && offset < dropped->end_of_sack_range) {
+            /* We're in a dropped range, skip to the end */
+            offset = dropped->end_of_sack_range;
+        } else {
+            /* The dropped range is after our offset */
+            break;
+        }
+        
+        node = picosplay_next(node);
+    }
+    
+    return offset;
 }

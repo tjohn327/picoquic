@@ -440,6 +440,19 @@ int picoquic_prepare_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
         bytes = picoquic_transport_param_type_varint_encode(bytes, bytes_max, picoquic_tp_enable_time_stamp,
             cnx->local_parameters.enable_time_stamp);
     }
+    
+    /* Encode receive timestamp extension parameters */
+    if (cnx->local_parameters.max_receive_timestamps_per_ack > 0 && bytes != NULL) {
+        bytes = picoquic_transport_param_type_varint_encode(bytes, bytes_max, 
+            picoquic_tp_max_receive_timestamps_per_ack,
+            cnx->local_parameters.max_receive_timestamps_per_ack);
+    }
+    
+    if (cnx->local_parameters.receive_timestamps_exponent > 0 && bytes != NULL) {
+        bytes = picoquic_transport_param_type_varint_encode(bytes, bytes_max,
+            picoquic_tp_receive_timestamps_exponent,
+            cnx->local_parameters.receive_timestamps_exponent);
+    }
 
     if (cnx->local_parameters.do_grease_quic_bit && bytes != NULL) {
         bytes = picoquic_transport_param_type_flag_encode(bytes, bytes_max, picoquic_tp_grease_quic_bit);
@@ -753,6 +766,24 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
                         }
                         else {
                             cnx->remote_parameters.enable_time_stamp = (int)tp_time_stamp;
+                        }
+                    }
+                    break;
+                }
+                case picoquic_tp_max_receive_timestamps_per_ack: {
+                    cnx->remote_parameters.max_receive_timestamps_per_ack =
+                        picoquic_transport_param_varint_decode(cnx, bytes + byte_index, extension_length, &ret);
+                    break;
+                }
+                case picoquic_tp_receive_timestamps_exponent: {
+                    uint64_t exponent =
+                        picoquic_transport_param_varint_decode(cnx, bytes + byte_index, extension_length, &ret);
+                    if (ret == 0) {
+                        if (exponent > 20) {
+                            ret = picoquic_connection_error_ex(cnx, PICOQUIC_TRANSPORT_PARAMETER_ERROR, 0, 
+                                "Receive timestamps exponent too large");
+                        } else {
+                            cnx->remote_parameters.receive_timestamps_exponent = (uint8_t)exponent;
                         }
                     }
                     break;

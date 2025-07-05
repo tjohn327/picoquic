@@ -1293,6 +1293,9 @@ void picoquic_init_transport_parameters(picoquic_tp_t* tp, int client_mode)
     tp->min_ack_delay = PICOQUIC_ACK_DELAY_MIN;
     tp->enable_time_stamp = 0;
     tp->enable_bdp_frame = 0;
+    /* Initialize receive timestamp extension parameters */
+    tp->max_receive_timestamps_per_ack = 0; /* Disabled by default */
+    tp->receive_timestamps_exponent = 0; /* Default to microsecond precision */
 }
 
 
@@ -3859,6 +3862,8 @@ picoquic_cnx_t* picoquic_create_cnx(picoquic_quic_t* quic,
         memset(cnx, 0, sizeof(picoquic_cnx_t));
         cnx->start_time = start_time;
         cnx->phase_delay = INT64_MAX;
+        /* Initialize receive timestamp basis - must be less than any packet receive time */
+        cnx->receive_timestamp_basis = start_time;
         cnx->client_mode = client_mode;
         if (client_mode) {
             if (picoquic_is_connection_id_null(&initial_cnx_id)) {

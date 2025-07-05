@@ -106,6 +106,27 @@ int picoquic_sack_insert_item(picoquic_sack_list_t* sack_list, uint64_t range_mi
 
     return ret;
 }
+/* Allocate and initialize timestamp storage for a SACK item */
+static int picoquic_sack_item_alloc_timestamps(picoquic_sack_item_t* sack, size_t count)
+{
+    int ret = 0;
+    
+    if (sack->receive_timestamps != NULL) {
+        free(sack->receive_timestamps);
+    }
+    
+    sack->receive_timestamps = (uint64_t*)malloc(count * sizeof(uint64_t));
+    if (sack->receive_timestamps == NULL) {
+        sack->receive_timestamps_count = 0;
+        ret = -1;
+    } else {
+        sack->receive_timestamps_count = count;
+        memset(sack->receive_timestamps, 0, count * sizeof(uint64_t));
+    }
+    
+    return ret;
+}
+
 void picoquic_sack_delete_item(picoquic_sack_list_t* sack_list, picoquic_sack_item_t* sack)
 {
     /* Accounting of deleted values */
@@ -113,6 +134,11 @@ void picoquic_sack_delete_item(picoquic_sack_list_t* sack_list, picoquic_sack_it
         if (sack->nb_times_sent[r] < PICOQUIC_MAX_ACK_RANGE_REPEAT) {
             sack_list->rc[r].range_counts[sack->nb_times_sent[r]] -= 1;
         }
+    }
+    /* Free timestamp storage if allocated */
+    if (sack->receive_timestamps != NULL) {
+        free(sack->receive_timestamps);
+        sack->receive_timestamps = NULL;
     }
     /* Delete the item in the splay */
     picosplay_delete_hint(&sack_list->ack_tree, &sack->node);
@@ -194,6 +220,10 @@ int picoquic_is_pn_already_received(picoquic_cnx_t* cnx,
  * in order to not mess up the ordered list.
  */
 
+/* Forward declaration */
+static picoquic_sack_item_t* picoquic_sack_find_range(picoquic_sack_list_t* sack_list,
+    uint64_t pn64_min, uint64_t pn64_max);
+
 int picoquic_update_sack_list(picoquic_sack_list_t* sack_list,
     uint64_t pn64_min, uint64_t pn64_max, uint64_t current_time)
 {
@@ -255,6 +285,39 @@ int picoquic_update_sack_list(picoquic_sack_list_t* sack_list,
     return ret;
 }
 
+int picoquic_update_sack_list_ex(picoquic_sack_list_t* sack_list,
+    uint64_t pn64_min, uint64_t pn64_max, uint64_t current_time, uint64_t receive_timestamp)
+{
+    int ret = picoquic_update_sack_list(sack_list, pn64_min, pn64_max, current_time);
+    
+    /* If receive timestamps are enabled and we successfully added/updated a sack item,
+     * store the timestamp */
+    if (ret == 0 && receive_timestamp != 0 && pn64_min == pn64_max) {
+        /* Find the sack item that contains this packet number */
+        picoquic_sack_item_t* item = picoquic_sack_find_range(sack_list, pn64_min, pn64_max);
+        if (item != NULL) {
+            /* Calculate the range size */
+            size_t range_size = (size_t)(item->end_of_sack_range - item->start_of_sack_range + 1);
+            
+            /* Allocate timestamp storage if not already allocated */
+            if (item->receive_timestamps == NULL) {
+                ret = picoquic_sack_item_alloc_timestamps(item, range_size);
+            }
+            
+            /* Store the timestamp for this specific packet */
+            if (ret == 0 && pn64_min >= item->start_of_sack_range && 
+                pn64_min <= item->end_of_sack_range) {
+                size_t index = (size_t)(pn64_min - item->start_of_sack_range);
+                if (index < item->receive_timestamps_count) {
+                    item->receive_timestamps[index] = receive_timestamp;
+                }
+            }
+        }
+    }
+    
+    return ret;
+}
+
 int picoquic_record_pn_received(picoquic_cnx_t* cnx,
     picoquic_packet_context_enum pc,
     picoquic_local_cnxid_t * l_cid,
@@ -288,7 +351,17 @@ int picoquic_record_pn_received(picoquic_cnx_t* cnx,
             }
         }
 
-        ret = picoquic_update_sack_list(sack_list, pn64, pn64, current_microsec);
+        /* Pass the timestamp if receive timestamps are enabled */
+        uint64_t receive_timestamp = 0;
+        if (cnx->remote_parameters.max_receive_timestamps_per_ack > 0) {
+            /* Update the receive timestamp basis if this is the first packet */
+            if (cnx->receive_timestamp_basis == 0) {
+                cnx->receive_timestamp_basis = current_microsec;
+            }
+            receive_timestamp = current_microsec;
+        }
+
+        ret = picoquic_update_sack_list_ex(sack_list, pn64, pn64, current_microsec, receive_timestamp);
     }
     return ret;
 }
@@ -318,6 +391,19 @@ void picoquic_sack_select_ack_ranges(picoquic_sack_list_t* sack_list, picoquic_s
             break;
         }
     }
+}
+
+/* Find a sack item that contains the given range */
+static picoquic_sack_item_t* picoquic_sack_find_range(picoquic_sack_list_t* sack_list,
+    uint64_t pn64_min, uint64_t pn64_max)
+{
+    picoquic_sack_item_t* item = picoquic_sack_find_range_below_number(sack_list, NULL, pn64_max);
+    
+    if (item != NULL && item->start_of_sack_range <= pn64_min && item->end_of_sack_range >= pn64_max) {
+        return item;
+    }
+    
+    return NULL;
 }
 
 /*

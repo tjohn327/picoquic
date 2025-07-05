@@ -594,6 +594,8 @@ typedef uint64_t picoquic_tp_enum;
 #define picoquic_tp_enable_bdp_frame 0xebd9 /* per draft-kuhn-quic-0rtt-bdp-09 */
 #define picoquic_tp_initial_max_path_id 0x0f739bbc1b666d0dull /* per draft quic multipath 13 */ 
 #define picoquic_tp_address_discovery 0x9f81a176 /* per draft-seemann-quic-address-discovery */
+#define picoquic_tp_max_receive_timestamps_per_ack 0xff0a002ull /* per draft-smith-quic-receive-ts-02 */
+#define picoquic_tp_receive_timestamps_exponent 0xff0a003ull /* per draft-smith-quic-receive-ts-02 */
 
 /* Callback for converting binary log to quic log at the end of a connection. 
  * This is kept private for now; and will only be set through the "set quic log"
@@ -766,6 +768,9 @@ typedef struct st_picoquic_sack_item_t {
     uint64_t end_of_sack_range;
     uint64_t time_created;
     int nb_times_sent[2];
+    /* Receive timestamps for packets in this range - NULL if not collecting timestamps */
+    uint64_t* receive_timestamps;
+    size_t receive_timestamps_count;
 } picoquic_sack_item_t;
 
 typedef struct st_picoquic_sack_range_count_t {
@@ -1382,6 +1387,8 @@ typedef struct st_picoquic_cnx_t {
 
     uint64_t start_time;
     int64_t phase_delay;
+    /* Receive timestamp basis per draft-smith-quic-receive-ts-02 */
+    uint64_t receive_timestamp_basis;
     uint64_t application_error;
     uint64_t local_error;
     char const * local_error_reason;
@@ -1829,8 +1836,13 @@ int picoquic_record_pn_received(picoquic_cnx_t* cnx, picoquic_packet_context_enu
 void picoquic_sack_select_ack_ranges(picoquic_sack_list_t* sack_list, picoquic_sack_item_t* first_sack,
     int max_ranges, int is_opportunistic, int* nb_sent_max, int* nb_sent_max_skip);
 
+void picoquic_sack_list_init(picoquic_sack_list_t* sack_list);
+void picoquic_sack_list_free(picoquic_sack_list_t* sack_list);
+
 int picoquic_update_sack_list(picoquic_sack_list_t* sack,
     uint64_t pn64_min, uint64_t pn64_max, uint64_t current_time);
+int picoquic_update_sack_list_ex(picoquic_sack_list_t* sack,
+    uint64_t pn64_min, uint64_t pn64_max, uint64_t current_time, uint64_t receive_timestamp);
 /* Check whether the data fills a hole. returns 0 if it does, -1 otherwise. */
 int picoquic_check_sack_list(picoquic_sack_list_t* sack,
     uint64_t pn64_min, uint64_t pn64_max);

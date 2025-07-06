@@ -544,14 +544,24 @@ int picoquic_is_stream_data_dropped(picoquic_stream_head_t* stream, uint64_t off
     return 0;
 }
 
+/* Deadline proximity threshold: streams within 10ms of each other 
+ * are considered to have similar urgency and are scheduled round-robin */
+#define DEADLINE_PROXIMITY_THRESHOLD_US 10000
+
 /* Find ready stream using EDF (Earliest Deadline First) scheduling with fairness */
 picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, picoquic_path_t* path_x)
 {
     picoquic_stream_head_t* stream = cnx->first_output_stream;
     picoquic_stream_head_t* best_stream = NULL;
     picoquic_stream_head_t* best_non_deadline_stream = NULL;
+    picoquic_stream_head_t* earliest_not_sent_recently = NULL;
     uint64_t earliest_deadline = UINT64_MAX;
     uint64_t current_time = picoquic_get_quic_time(cnx->quic);
+    uint64_t oldest_send_time = UINT64_MAX;
+    
+    /* Debug logging */
+    static int debug_counter = 0;
+    int should_debug = (debug_counter++ % 100 == 0); /* Debug every 100 calls */
     
     /* Check if fairness enforcement is needed */
     int force_non_deadline = 0;
@@ -581,12 +591,12 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
         }
     }
     
-    /* First pass: find stream with earliest deadline that has data to send */
+    /* First pass: find streams with data to send */
     while (stream != NULL) {
         picoquic_stream_head_t* next_stream = stream->next_output_stream;
         int has_data = 0;
         
-        /* Check if stream has data to send (same logic as original function) */
+        /* Check if stream has data to send */
         has_data = (cnx->maxdata_remote > cnx->data_sent && 
                    stream->sent_offset < stream->maxdata_remote && 
                    (stream->is_active ||
@@ -617,19 +627,57 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
         }
         
         if (has_data) {
-            /* For deadline-aware streams, use EDF */
+            if (should_debug) {
+                printf("[EDF]   Stream %lu: has_data=1, deadline_ctx=%p, deadline_enabled=%d\n", 
+                    stream->stream_id, (void*)stream->deadline_ctx,
+                    stream->deadline_ctx ? stream->deadline_ctx->deadline_enabled : 0);
+            }
+            /* For deadline-aware streams */
             if (stream->deadline_ctx != NULL && stream->deadline_ctx->deadline_enabled) {
                 /* Skip if deadline already passed and it's a hard deadline */
                 if (current_time >= stream->deadline_ctx->absolute_deadline && 
                     stream->deadline_ctx->deadline_type == 1) {
                     /* This data should be dropped, not sent */
                     has_data = 0;
-                } else if (!force_non_deadline && stream->deadline_ctx->absolute_deadline < earliest_deadline) {
-                    earliest_deadline = stream->deadline_ctx->absolute_deadline;
-                    best_stream = stream;
+                    if (should_debug) {
+                        DBG_PRINTF("  Stream %lu: deadline expired, dropping data\n", stream->stream_id);
+                    }
+                }
+                
+                /* Process deadline stream if it still has data and we're not forcing non-deadline */
+                if (has_data && !force_non_deadline) {
+                    if (should_debug) {
+                        printf("[EDF]     Processing deadline stream %lu, absolute_deadline=%lu, earliest=%lu\n",
+                            stream->stream_id, stream->deadline_ctx->absolute_deadline, earliest_deadline);
+                    }
+                    /* Check if this stream has a deadline close to the earliest we've seen */
+                    uint64_t deadline_threshold = (earliest_deadline == UINT64_MAX) ? UINT64_MAX : 
+                                                  (earliest_deadline + DEADLINE_PROXIMITY_THRESHOLD_US);
+                    if (stream->deadline_ctx->absolute_deadline <= deadline_threshold) {
+                        /* This stream is in the same urgency group */
+                        if (stream->deadline_ctx->absolute_deadline < earliest_deadline) {
+                            /* New earliest deadline - reset the group */
+                            earliest_deadline = stream->deadline_ctx->absolute_deadline;
+                            oldest_send_time = stream->last_time_data_sent;
+                            earliest_not_sent_recently = stream;
+                            if (should_debug) {
+                                printf("[EDF]     Stream %lu: NEW earliest deadline (%lu), last_send=%lu\n",
+                                    stream->stream_id, stream->deadline_ctx->absolute_deadline, 
+                                    stream->last_time_data_sent);
+                            }
+                        } else if (stream->last_time_data_sent <= oldest_send_time) {
+                            /* Same urgency group, but sent less recently or equal - round robin */
+                            oldest_send_time = stream->last_time_data_sent;
+                            earliest_not_sent_recently = stream;
+                            if (should_debug) {
+                                printf("[EDF]     Stream %lu: same group, older send time (%lu <= %lu)\n",
+                                    stream->stream_id, stream->last_time_data_sent, oldest_send_time);
+                            }
+                        }
+                    }
                 }
             } else {
-                /* Track best non-deadline stream */
+                /* Non-deadline stream */
                 if (best_non_deadline_stream == NULL) {
                     best_non_deadline_stream = stream;
                 } else if ((stream->stream_priority & 1) != 0) {
@@ -638,11 +686,6 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
                 } else if (stream->last_time_data_sent < best_non_deadline_stream->last_time_data_sent) {
                     /* Round-robin */
                     best_non_deadline_stream = stream;
-                }
-                
-                /* Select non-deadline stream if no deadline stream found yet or fairness forces it */
-                if (best_stream == NULL || force_non_deadline) {
-                    best_stream = stream;
                 }
             }
         } else if (((stream->fin_requested && stream->fin_sent) || 
@@ -666,13 +709,29 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
         stream = next_stream;
     }
     
-    /* Apply fairness logic if needed */
+    /* Select the best stream based on the analysis */
+    if (should_debug) {
+        printf("[EDF] Selection: force_non_deadline=%d, earliest_not_sent_recently=%p (stream %lu), best_non_deadline=%p (stream %lu)\n",
+            force_non_deadline,
+            (void*)earliest_not_sent_recently, 
+            earliest_not_sent_recently ? earliest_not_sent_recently->stream_id : 0,
+            (void*)best_non_deadline_stream,
+            best_non_deadline_stream ? best_non_deadline_stream->stream_id : 0);
+    }
+    
     if (force_non_deadline && best_non_deadline_stream != NULL) {
+        best_stream = best_non_deadline_stream;
+    } else if (earliest_not_sent_recently != NULL) {
+        best_stream = earliest_not_sent_recently;
+    } else if (best_non_deadline_stream != NULL) {
         best_stream = best_non_deadline_stream;
     }
     
-    /* Update fairness tracking */
+    /* Update fairness tracking and last send time */
     if (cnx->deadline_context != NULL && best_stream != NULL) {
+        /* Update last send time for round-robin */
+        best_stream->last_time_data_sent = current_time;
+        
         if (best_stream->deadline_ctx != NULL && best_stream->deadline_ctx->deadline_enabled) {
             /* Selected a deadline stream */
             cnx->deadline_context->deadline_bytes_sent += PICOQUIC_MIN_SEGMENT_SIZE; /* Approximate */

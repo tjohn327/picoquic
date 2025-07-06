@@ -1311,6 +1311,7 @@ void usage()
     fprintf(stderr, "                        -f 3  test migration to new address.\n");
     fprintf(stderr, "  -u nb                 trigger key update after receiving <nb> packets on client\n");
     fprintf(stderr, "  -1                    Once: close the server after processing 1 connection.\n");
+    fprintf(stderr, "  -Z                    Enable deadline-aware streams support.\n");
 
     fprintf(stderr, "\nThe scenario argument specifies the set of files that should be retrieved,\n");
     fprintf(stderr, "and their order. The syntax is:\n");
@@ -1343,6 +1344,7 @@ int main(int argc, char** argv)
     int force_migration = 0;
     int just_once = 0;
     int is_client = 0;
+    int enable_deadline_streams = 0;
     int ret;
 
 #ifdef _WINDOWS
@@ -1351,8 +1353,8 @@ int main(int argc, char** argv)
 #endif
     picoquic_register_all_congestion_control_algorithms();
     picoquic_config_init(&config);
-    memcpy(option_string, "A:u:f:1", 7);
-    ret = picoquic_config_option_letters(option_string + 7, sizeof(option_string) - 7, NULL);
+    memcpy(option_string, "A:u:f:1Z", 8);
+    ret = picoquic_config_option_letters(option_string + 8, sizeof(option_string) - 8, NULL);
 
     if (ret == 0) {
         /* Get the parameters */
@@ -1373,6 +1375,9 @@ int main(int argc, char** argv)
                 break;
             case '1':
                 just_once = 1;
+                break;
+            case 'Z':
+                enable_deadline_streams = 1;
                 break;
             case 'A':
                 config.multipath_alt_config = malloc(sizeof(char) * (strlen(optarg) + 1));
@@ -1429,6 +1434,9 @@ int main(int argc, char** argv)
         /* Run as server */
         printf("Starting Picoquic server (v%s) on port %d, server name = %s, just_once = %d, do_retry = %d\n",
             PICOQUIC_VERSION, config.server_port, server_name, just_once, config.do_retry);
+        if (enable_deadline_streams) {
+            printf("Note: Deadline-aware streams support enabled (use -Z option)\n");
+        }
         ret = quic_server(server_name, &config, just_once);
         printf("Server exit with code = %d\n", ret);
     }

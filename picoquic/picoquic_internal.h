@@ -409,6 +409,10 @@ typedef struct st_picoquic_packet_t {
     uint64_t data_repeat_stream_id;
     uint64_t data_repeat_stream_offset;
     size_t data_repeat_stream_data_length;
+    
+    /* Deadline tracking for smart retransmission */
+    uint64_t earliest_deadline;      /* Earliest deadline among all streams in packet */
+    uint8_t contains_deadline_data;  /* Whether packet contains deadline stream data */
 
     size_t length;
     size_t checksum_overhead;
@@ -821,6 +825,29 @@ typedef struct st_picoquic_deadline_context_t {
     /* Callbacks */
     picoquic_deadline_missed_fn on_deadline_missed;
     void* deadline_callback_ctx;
+    
+    /* Path metrics for deadline streams */
+    struct {
+        uint64_t deadline_streams_sent;      /* Total deadline streams sent on path */
+        uint64_t deadline_streams_met;       /* Streams that met their deadline */
+        uint64_t total_deadline_bytes;       /* Total bytes sent for deadline streams */
+        uint64_t path_switches_for_deadline; /* Times path was switched for deadline */
+        uint64_t last_deadline_success_time; /* Last successful deadline delivery */
+    } path_metrics[16]; /* Support up to 16 paths */
+    
+    /* Fairness tracking for preventing starvation */
+    uint64_t deadline_bytes_sent;
+    uint64_t non_deadline_bytes_sent;
+    uint64_t window_start_time;
+    uint64_t last_non_deadline_scheduled;
+    
+    /* Fairness configuration */
+    double min_non_deadline_share;  /* e.g., 0.2 (20%) */
+    uint64_t max_starvation_time;   /* e.g., 50ms */
+    
+    /* Deadline class tracking */
+    uint64_t class_bytes[4];        /* URGENT, NORMAL, RELAXED, NONE */
+    uint64_t class_last_scheduled[4];
 } picoquic_deadline_context_t;
 
 typedef struct st_picoquic_path_deadline_metrics_t {
@@ -2021,6 +2048,9 @@ const uint8_t* picoquic_parse_stream_data_dropped_frame(picoquic_cnx_t* cnx,
     const uint8_t* bytes, const uint8_t* bytes_max, uint64_t current_time);
 const uint8_t* picoquic_skip_stream_data_dropped_frame(const uint8_t* bytes, const uint8_t* bytes_max);
 uint64_t picoquic_skip_dropped_ranges(picoquic_sack_list_t* dropped_ranges, uint64_t offset);
+void picoquic_update_packet_deadline_info(picoquic_cnx_t* cnx, picoquic_packet_t* packet, uint64_t current_time);
+int picoquic_should_skip_packet_retransmit(picoquic_cnx_t* cnx, picoquic_packet_t* packet, uint64_t current_time);
+picoquic_path_t* picoquic_select_path_for_retransmit(picoquic_cnx_t* cnx, picoquic_packet_t* packet, uint64_t current_time);
 
 /* Handling of retransmission of frames.
  * When a packet is deemed lost, the code looks at the frames that it contained and

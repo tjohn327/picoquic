@@ -337,11 +337,41 @@ static size_t picoquic_retransmit_needed_packet(picoquic_cnx_t* cnx, picoquic_pa
     }
 
     if (is_probably_lost) {
-        if (old_p->is_ack_trap) {
+        /* Check if we should skip retransmission due to expired deadline */
+        if (picoquic_should_skip_packet_retransmit(cnx, old_p, current_time)) {
+            /* Hard deadline expired - skip retransmission and free packet */
+            picoquic_dequeue_retransmit_packet(cnx, pkt_ctx, old_p, 1, 0);
+            
+            /* Update deadline miss statistics */
+            if (cnx->deadline_context != NULL && old_path != NULL && 
+                old_path->unique_path_id < 16) {
+                cnx->deadline_context->path_metrics[old_path->unique_path_id].deadline_streams_sent++;
+            }
+            
+            /* Continue to next packet */
+            *continue_next = 1;
+        }
+        else if (old_p->is_ack_trap) {
             picoquic_dequeue_retransmit_packet(cnx, pkt_ctx, old_p, 1, 0);
             *continue_next = 1;
         }
         else {
+            /* If multipath and deadline-aware, select best path for retransmission */
+            if (cnx->is_multipath_enabled && cnx->deadline_context != NULL && 
+                cnx->deadline_context->deadline_aware_enabled && old_p->contains_deadline_data) {
+                picoquic_path_t* best_path = picoquic_select_path_for_retransmit(cnx, old_p, current_time);
+                if (best_path != NULL && best_path != path_x && 
+                    best_path->first_tuple != NULL && best_path->first_tuple->challenge_verified) {
+                    /* Switch to better path for deadline-aware retransmission */
+                    path_x = best_path;
+                    
+                    /* Track path switch for deadline */
+                    if (best_path->unique_path_id < 16) {
+                        cnx->deadline_context->path_metrics[best_path->unique_path_id].path_switches_for_deadline++;
+                    }
+                }
+            }
+            
             /* check if this is an ACK only packet */
             int packet_is_pure_ack = 1;
 

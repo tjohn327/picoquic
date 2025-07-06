@@ -591,6 +591,9 @@ int receive_timestamp_test();
 int deadline_test();
 int deadline_edf_test();
 int deadline_partial_reliability_test();
+int deadline_path_selection_test();
+int deadline_packet_tracking_test();
+int deadline_smart_retransmit_test();
 
 #ifdef __cplusplus
 }

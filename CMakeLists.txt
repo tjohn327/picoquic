@@ -171,6 +171,9 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/deadline_test.c
     picoquictest/deadline_edf_test.c
     picoquictest/deadline_partial_reliability_test.c
+    picoquictest/deadline_path_selection_test.c
+    picoquictest/deadline_packet_tracking_test.c
+    picoquictest/deadline_smart_retransmit_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c

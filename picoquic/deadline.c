@@ -227,7 +227,7 @@ int picoquic_can_meet_deadline(picoquic_cnx_t* cnx, picoquic_stream_head_t* stre
     return (estimated_transmission_time < time_remaining);
 }
 
-/* Select best path for deadline-aware stream */
+/* Select best path for deadline-aware stream with composite scoring */
 picoquic_path_t* picoquic_select_path_for_deadline(picoquic_cnx_t* cnx,
     picoquic_stream_head_t* stream, uint64_t current_time)
 {
@@ -238,37 +238,119 @@ picoquic_path_t* picoquic_select_path_for_deadline(picoquic_cnx_t* cnx,
     }
     
     picoquic_path_t* best_path = NULL;
-    uint64_t best_score = UINT64_MAX;
+    double best_score = 0;
+    
+    /* Calculate deadline urgency */
+    uint64_t time_to_deadline = (stream->deadline_ctx->absolute_deadline > current_time) ?
+        stream->deadline_ctx->absolute_deadline - current_time : 0;
+    
+    /* Estimate stream data size (remaining to send) */
+    uint64_t stream_bytes = 0;
+    if (stream->send_queue != NULL) {
+        picoquic_stream_queue_node_t* node = stream->send_queue;
+        while (node != NULL) {
+            stream_bytes += (node->length - node->offset);
+            node = node->next_stream_data;
+        }
+    }
+    
+    /* If no data to send, return default path */
+    if (stream_bytes == 0) {
+        return cnx->path[0];
+    }
     
     /* Iterate through all available paths */
     for (int i = 0; i < cnx->nb_paths; i++) {
         picoquic_path_t* path = cnx->path[i];
         
         /* Skip paths that are not ready */
-        if (path->path_is_demoted) {
+        if (path->path_is_demoted || !path->rtt_is_initialized) {
             continue;
         }
+        
+        /* Calculate available congestion window */
+        uint64_t available_cwnd = (path->cwin > path->bytes_in_transit) ? 
+            (path->cwin - path->bytes_in_transit) : 0;
+        
+        /* Skip paths with no available congestion window */
+        if (available_cwnd < PICOQUIC_MIN_SEGMENT_SIZE) {
+            continue;
+        }
+        
+        /* Calculate effective bandwidth considering congestion */
+        uint64_t effective_bandwidth = path->bandwidth_estimate;
+        if (effective_bandwidth == 0) {
+            /* Estimate bandwidth from RTT and CWND if not measured */
+            effective_bandwidth = (path->cwin * 1000000) / path->smoothed_rtt;
+        }
+        
+        /* Adjust bandwidth based on congestion state */
+        double congestion_factor = (double)available_cwnd / path->cwin;
+        effective_bandwidth = (uint64_t)(effective_bandwidth * congestion_factor);
+        
+        /* Calculate transmission time */
+        uint64_t transmission_time = 0;
+        if (effective_bandwidth > 0) {
+            transmission_time = (stream_bytes * 8 * 1000000) / effective_bandwidth;
+        } else {
+            /* Fallback: assume minimum bandwidth */
+            transmission_time = (stream_bytes * 8 * 1000000) / 100000; /* 100 Kbps min */
+        }
+        
+        /* Calculate total delivery time */
+        uint64_t total_delivery_time = path->smoothed_rtt + transmission_time;
         
         /* Check if path can meet deadline */
-        if (!picoquic_can_meet_deadline(cnx, stream, path, current_time)) {
-            continue;
+        int can_meet_deadline = (total_delivery_time < time_to_deadline);
+        
+        /* Calculate composite score */
+        double score = 0;
+        
+        if (can_meet_deadline || time_to_deadline == 0) {
+            /* RTT component (normalized to milliseconds, inverse for scoring) */
+            double rtt_score = 1000.0 / (path->smoothed_rtt / 1000.0 + 1.0);
+            
+            /* Bandwidth component (normalized to Mbps) */
+            double bw_score = effective_bandwidth / 1000000.0;
+            if (bw_score > 100.0) bw_score = 100.0; /* Cap at 100 Mbps */
+            
+            /* Loss rate component */
+            double loss_rate = 0;
+            if (path->bytes_sent > 0) {
+                loss_rate = (double)path->total_bytes_lost / path->bytes_sent;
+            }
+            double loss_penalty = 1.0 - (loss_rate * 10.0); /* 10x penalty for loss */
+            if (loss_penalty < 0.1) loss_penalty = 0.1; /* Min score */
+            
+            /* Congestion component */
+            double congestion_score = congestion_factor;
+            
+            /* Deadline urgency bonus for paths that can meet deadline */
+            double deadline_bonus = can_meet_deadline ? 2.0 : 1.0;
+            
+            /* Composite score with weights */
+            score = (rtt_score * 0.3 +          /* 30% weight on RTT */
+                    bw_score * 0.3 +            /* 30% weight on bandwidth */
+                    loss_penalty * 0.2 +        /* 20% weight on loss */
+                    congestion_score * 0.2) *   /* 20% weight on congestion */
+                    deadline_bonus;             /* 2x bonus if can meet deadline */
+            
+            /* Penalty for paths with recent losses */
+            if (current_time - path->last_loss_event_detected < 10 * path->smoothed_rtt) {
+                score *= 0.5; /* Recent loss penalty */
+            }
+        } else {
+            /* Path cannot meet deadline - give minimal score based on RTT only */
+            score = 0.1 / (path->smoothed_rtt / 1000000.0 + 1.0);
         }
         
-        /* Score based on RTT (lower is better) */
-        uint64_t score = path->smoothed_rtt;
-        
-        /* Adjust score based on congestion window availability */
-        if (path->bytes_in_transit >= path->cwin) {
-            score = score * 2; /* Penalize congested paths */
-        }
-        
-        if (score < best_score) {
+        if (score > best_score) {
             best_score = score;
             best_path = path;
         }
     }
     
-    /* If no path can meet deadline, still return the fastest path */
+    /* If no path selected, fall back to lowest RTT path */
     if (best_path == NULL && cnx->nb_paths > 0) {
         best_path = cnx->path[0];
         for (int i = 1; i < cnx->nb_paths; i++) {
@@ -295,6 +377,17 @@ void picoquic_init_deadline_context(picoquic_cnx_t* cnx)
                  cnx->remote_parameters.enable_deadline_aware_streams);
             cnx->deadline_context->deadline_scheduling_active = 
                 cnx->deadline_context->deadline_aware_enabled;
+            
+            /* Initialize fairness parameters */
+            cnx->deadline_context->min_non_deadline_share = 0.2;  /* 20% minimum for non-deadline */
+            cnx->deadline_context->max_starvation_time = 50000;   /* 50ms max starvation */
+            cnx->deadline_context->window_start_time = picoquic_get_quic_time(cnx->quic);
+            
+            /* Initialize path metrics */
+            for (int i = 0; i < 16; i++) {
+                memset(&cnx->deadline_context->path_metrics[i], 0, 
+                    sizeof(cnx->deadline_context->path_metrics[i]));
+            }
         }
     }
 }
@@ -706,4 +799,77 @@ uint64_t picoquic_skip_dropped_ranges(picoquic_sack_list_t* dropped_ranges, uint
     }
     
     return offset;
+}
+
+/* Update packet deadline tracking based on stream data in packet */
+void picoquic_update_packet_deadline_info(picoquic_cnx_t* cnx, picoquic_packet_t* packet, uint64_t current_time)
+{
+    if (!cnx->deadline_context || !cnx->deadline_context->deadline_aware_enabled || packet == NULL) {
+        return;
+    }
+    
+    /* Initialize deadline tracking */
+    packet->earliest_deadline = UINT64_MAX;
+    packet->contains_deadline_data = 0;
+    
+    /* If packet has stream data, check the stream's deadline */
+    if (packet->data_repeat_stream_id != (uint64_t)-1) {
+        picoquic_stream_head_t* stream = picoquic_find_stream(cnx, packet->data_repeat_stream_id);
+        if (stream != NULL && stream->deadline_ctx != NULL && stream->deadline_ctx->deadline_enabled) {
+            packet->contains_deadline_data = 1;
+            packet->earliest_deadline = stream->deadline_ctx->absolute_deadline;
+        }
+    }
+    
+    /* Alternative: parse packet bytes to find all stream frames and check their deadlines */
+    /* This would be more comprehensive but also more expensive */
+}
+
+/* Check if packet contains expired deadline data that shouldn't be retransmitted */
+int picoquic_should_skip_packet_retransmit(picoquic_cnx_t* cnx, picoquic_packet_t* packet, uint64_t current_time)
+{
+    if (!cnx->deadline_context || !cnx->deadline_context->deadline_aware_enabled || 
+        !packet->contains_deadline_data) {
+        /* No deadline data or deadline awareness disabled - normal retransmission */
+        return 0;
+    }
+    
+    /* Check if the deadline has expired */
+    if (current_time >= packet->earliest_deadline) {
+        /* Deadline has passed - check if it's a hard deadline */
+        if (packet->data_repeat_stream_id != (uint64_t)-1) {
+            picoquic_stream_head_t* stream = picoquic_find_stream(cnx, packet->data_repeat_stream_id);
+            if (stream != NULL && stream->deadline_ctx != NULL && 
+                stream->deadline_ctx->deadline_type == 1) {
+                /* Hard deadline expired - skip retransmission */
+                return 1;
+            }
+        }
+    }
+    
+    return 0;
+}
+
+/* Select best path for deadline-aware retransmission */
+picoquic_path_t* picoquic_select_path_for_retransmit(picoquic_cnx_t* cnx, picoquic_packet_t* packet, 
+    uint64_t current_time)
+{
+    if (!cnx->deadline_context || !cnx->deadline_context->deadline_aware_enabled ||
+        !packet->contains_deadline_data || !cnx->is_multipath_enabled) {
+        /* Use original path for non-deadline or non-multipath connections */
+        return packet->send_path;
+    }
+    
+    /* Find the stream to get its properties */
+    picoquic_stream_head_t* stream = NULL;
+    if (packet->data_repeat_stream_id != (uint64_t)-1) {
+        stream = picoquic_find_stream(cnx, packet->data_repeat_stream_id);
+    }
+    
+    if (stream == NULL || stream->deadline_ctx == NULL) {
+        return packet->send_path;
+    }
+    
+    /* Use our existing path selection logic for deadline streams */
+    return picoquic_select_path_for_deadline(cnx, stream, current_time);
 }

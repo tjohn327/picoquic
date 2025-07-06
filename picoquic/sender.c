@@ -1136,6 +1136,11 @@ void picoquic_finalize_and_protect_packet(picoquic_cnx_t *cnx,
             packet->sent_cwin_limited = 1;
         }
 
+        /* Update packet deadline information after all stream data has been added */
+        if (cnx->local_parameters.enable_deadline_aware_streams) {
+            picoquic_update_packet_deadline_info(cnx, packet, current_time);
+        }
+
         switch (packet->ptype) {
         case picoquic_packet_version_negotiation:
             /* Packet is not encrypted */

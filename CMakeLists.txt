@@ -77,6 +77,7 @@ endif()
 set(PICOQUIC_LIBRARY_FILES
     picoquic/bbr.c
     picoquic/bbr1.c
+    picoquic/bbr_deadline.c
     picoquic/bytestream.c
     picoquic/cc_common.c
     picoquic/config.c
@@ -183,6 +184,8 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/deadline_minimal_test.c
     picoquictest/deadline_ack_test.c
     picoquictest/deadline_debug_test.c
+    picoquictest/bbr_deadline_test.c
+    picoquictest/bbr_deadline_e2e_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c

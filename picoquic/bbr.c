@@ -24,6 +24,8 @@
 #include <string.h>
 #include "cc_common.h"
 #include "picoquic_utils.h"
+#include "bbr_common.h"
+#include "bbr_deadline.h"
 
 #ifdef BBRExperiment
 #define BBRExpGate(ctx, test, action) { if (!ctx->exp_flags.test) action; }
@@ -80,18 +82,7 @@ Hystart instead of startup if the RTT is above the Reno target of
 * accelerate the start-up phase.
 */
 
-typedef enum {
-    picoquic_bbr_alg_startup = 0,
-    picoquic_bbr_alg_drain,
-    /* picoquic_bbr_alg_probe_bw, */
-    picoquic_bbr_alg_probe_bw_down,
-    picoquic_bbr_alg_probe_bw_cruise,
-    picoquic_bbr_alg_probe_bw_refill,
-    picoquic_bbr_alg_probe_bw_up,
-    picoquic_bbr_alg_probe_rtt,
-    picoquic_bbr_alg_startup_long_rtt,
-    picoquic_bbr_alg_startup_resume
-} picoquic_bbr_alg_state_t;
+/* BBR algorithm states moved to bbr_common.h */
 
 typedef enum {
     picoquic_bbr_acks_probe_starting = 0,
@@ -283,6 +274,8 @@ typedef struct st_picoquic_bbr_state_t {
     /* Control flags for BBR improvements */
     bbr_exp exp_flags;
 #endif
+    /* Deadline-aware extensions */
+    bbr_deadline_state_t deadline_state;
 } picoquic_bbr_state_t;
 
 /* BBR v3 assumes that there is state associated with the acknowledgements.
@@ -593,6 +586,9 @@ static void BBROnInit(picoquic_bbr_state_t* bbr_state, picoquic_path_t* path_x, 
     BBRInitFullPipe(bbr_state);
     BBRInitPacingRate(bbr_state, path_x);
     BBREnterStartup(bbr_state, path_x);
+    
+    /* Initialize deadline-aware extensions */
+    bbr_deadline_init(&bbr_state->deadline_state);
 }
 
 static void picoquic_bbr_reset(picoquic_bbr_state_t* bbr_state, picoquic_path_t* path_x, uint64_t current_time)
@@ -714,6 +710,10 @@ static void BBRSetCwnd(picoquic_bbr_state_t* bbr_state, picoquic_path_t* path_x,
     }
     BBRBoundCwndForProbeRTT(bbr_state, path_x);
     BBRBoundCwndForModel(bbr_state, path_x);
+    
+    /* Apply deadline-aware congestion window adjustments */
+    path_x->cwin = bbr_deadline_cwnd_adjustment(&bbr_state->deadline_state, 
+        path_x->cwin, bbr_state->bdp, picoquic_current_time());
 }
 
 
@@ -961,7 +961,12 @@ static void BBRSetPacingRateWithGain(picoquic_bbr_state_t* bbr_state, double pac
 
 static void  BBRSetPacingRate(picoquic_bbr_state_t* bbr_state)
 {
-    BBRSetPacingRateWithGain(bbr_state, bbr_state->pacing_gain);
+    /* Apply deadline-aware pacing gain if applicable */
+    double effective_gain = bbr_deadline_pacing_gain(&bbr_state->deadline_state, 
+        bbr_state->pacing_gain, 
+        bbr_state->state == picoquic_bbr_alg_probe_bw_up);
+    
+    BBRSetPacingRateWithGain(bbr_state, effective_gain);
 }
 
 static void BBRSetSendQuantum(picoquic_bbr_state_t* bbr_state, picoquic_path_t* path_x)
@@ -1857,6 +1862,13 @@ static void BBRUpdateProbeBWCyclePhase(picoquic_bbr_state_t* bbr_state, picoquic
 
     switch (bbr_state->state) {
     case picoquic_bbr_alg_probe_bw_down:
+        /* Check if should skip probe_down for deadline urgency */
+        if (bbr_deadline_should_skip_probe(&bbr_state->deadline_state, 
+            bbr_state->state, current_time)) {
+            BBRStartProbeBW_CRUISE(bbr_state);
+            return;
+        }
+        
         if (BBRCheckTimeToProbeBW(bbr_state, path_x, rs, current_time))
             return; /* already decided state transition */
 #ifdef RTTJitterBufferProbe
@@ -2324,6 +2336,9 @@ static void BBRUpdateModelAndState(picoquic_bbr_state_t* bbr_state, picoquic_pat
     BBRAdvanceLatestDeliverySignals(bbr_state, rs);
     BBRAdvanceEcnFrac(bbr_state, path_x, rs);
     BBRBoundBWForModel(bbr_state);
+    
+    /* Update deadline urgency for deadline-aware streams */
+    bbr_deadline_update_urgency(path_x->cnx, path_x, &bbr_state->deadline_state, current_time);
 }
 
 static void BBRUpdateControlParameters(picoquic_bbr_state_t* bbr_state, picoquic_path_t* path_x, bbr_per_ack_state_t * rs)
@@ -2396,6 +2411,14 @@ static void picoquic_bbr_notify_ack(
     BBRSetRsFromAckState(path_x, ack_state, &rs);
     BBRComputeEcnFrac(bbr_state, path_x, &rs);
     BBRUpdateOnACK(bbr_state, path_x, &rs, current_time);
+    
+    /* Update deadline fairness tracking for acknowledged bytes */
+    if (ack_state->nb_bytes_acknowledged > 0) {
+        int is_deadline_boosted = (bbr_state->deadline_state.effective_pacing_gain > 
+                                  bbr_state->pacing_gain * 1.01); /* 1% tolerance */
+        bbr_deadline_update_fairness(&bbr_state->deadline_state, 
+            ack_state->nb_bytes_acknowledged, is_deadline_boosted, current_time);
+    }
 }
 
 /*

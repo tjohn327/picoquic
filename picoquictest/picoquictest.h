@@ -602,6 +602,8 @@ int deadline_network_sim_test();
 int deadline_network_transition_test();
 int deadline_simple_test();
 int deadline_minimal_test();
+int deadline_ack_test();
+int deadline_debug_test();
 
 #ifdef __cplusplus
 }

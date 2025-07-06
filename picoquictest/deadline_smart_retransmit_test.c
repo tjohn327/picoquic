@@ -108,13 +108,13 @@ int deadline_smart_retransmit_test()
     /* Test 1: Skip retransmission for expired hard deadline */
     if (ret == 0) {
         /* Create a stream with expired deadline */
-        picoquic_stream_head_t* stream = picoquic_create_stream(cnx, 0);
+        picoquic_stream_head_t* stream = picoquic_create_stream(cnx, 4);  /* Use stream 4 instead of 0 */
         if (stream == NULL) {
             DBG_PRINTF("%s", "Failed to create stream\n");
             ret = -1;
         } else {
             /* Set deadline that has already expired */
-            ret = picoquic_set_stream_deadline(cnx, 0, 10, 1); /* 10ms hard deadline */
+            ret = picoquic_set_stream_deadline(cnx, 4, 10, 1); /* 10ms hard deadline */
             /* Simulate time advancement so deadline is expired */
             simulated_time = 20000; /* 20ms - deadline should have expired at 10ms */
             stream->deadline_ctx->absolute_deadline = 10000; /* Expired 10ms ago */
@@ -125,7 +125,7 @@ int deadline_smart_retransmit_test()
                 DBG_PRINTF("%s", "Failed to create packet\n");
                 ret = -1;
             } else {
-                packet->data_repeat_stream_id = 0;
+                packet->data_repeat_stream_id = 4;
                 packet->send_path = cnx->path[0];
                 picoquic_update_packet_deadline_info(cnx, packet, 0); /* Use original time when packet was created */
                 
@@ -144,7 +144,7 @@ int deadline_smart_retransmit_test()
     
     /* Test 2: Don't skip retransmission for soft deadline */
     if (ret == 0) {
-        picoquic_stream_head_t* stream = picoquic_find_stream(cnx, 0);
+        picoquic_stream_head_t* stream = picoquic_find_stream(cnx, 4);
         if (stream != NULL) {
             /* Change to soft deadline */
             stream->deadline_ctx->deadline_type = 0; /* Soft deadline */
@@ -154,7 +154,7 @@ int deadline_smart_retransmit_test()
                 DBG_PRINTF("%s", "Failed to create packet for test 2\n");
                 ret = -1;
             } else {
-                packet->data_repeat_stream_id = 0;
+                packet->data_repeat_stream_id = 4;
                 packet->send_path = cnx->path[0];
                 picoquic_update_packet_deadline_info(cnx, packet, 0); /* Use original time when packet was created */
                 
@@ -174,7 +174,7 @@ int deadline_smart_retransmit_test()
     /* Test 3: Path selection for retransmission */
     if (ret == 0) {
         /* Create stream with future deadline */
-        picoquic_stream_head_t* stream = picoquic_find_stream(cnx, 0);
+        picoquic_stream_head_t* stream = picoquic_find_stream(cnx, 4);
         if (stream != NULL) {
             stream->deadline_ctx->deadline_type = 1; /* Hard deadline */
             stream->deadline_ctx->absolute_deadline = simulated_time + 30000; /* 30ms in future */
@@ -182,14 +182,14 @@ int deadline_smart_retransmit_test()
             /* Add some data to stream */
             uint8_t buffer[100];
             memset(buffer, 0x42, sizeof(buffer));
-            picoquic_add_to_stream(cnx, 0, buffer, sizeof(buffer), 0);
+            picoquic_add_to_stream(cnx, 4, buffer, sizeof(buffer), 0);
             
             picoquic_packet_t* packet = picoquic_create_packet(quic);
             if (packet == NULL) {
                 DBG_PRINTF("%s", "Failed to create packet for test 3\n");
                 ret = -1;
             } else {
-                packet->data_repeat_stream_id = 0;
+                packet->data_repeat_stream_id = 4;
                 packet->send_path = cnx->path[0]; /* Originally sent on slow path */
                 picoquic_update_packet_deadline_info(cnx, packet, simulated_time);
                 
@@ -211,7 +211,7 @@ int deadline_smart_retransmit_test()
     /* Test 4: Non-deadline packet uses original path */
     if (ret == 0) {
         /* Create non-deadline stream */
-        picoquic_stream_head_t* stream = picoquic_create_stream(cnx, 4);
+        picoquic_stream_head_t* stream = picoquic_create_stream(cnx, 8);  /* Different stream ID */
         if (stream == NULL) {
             DBG_PRINTF("%s", "Failed to create non-deadline stream\n");
             ret = -1;
@@ -221,7 +221,7 @@ int deadline_smart_retransmit_test()
                 DBG_PRINTF("%s", "Failed to create packet for test 4\n");
                 ret = -1;
             } else {
-                packet->data_repeat_stream_id = 4;
+                packet->data_repeat_stream_id = 8;
                 packet->send_path = cnx->path[0];
                 packet->contains_deadline_data = 0;
                 

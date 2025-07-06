@@ -517,6 +517,8 @@ static const picoquic_test_def_t test_table[] = {
     { "deadline_path_selection", deadline_path_selection_test },
     { "deadline_packet_tracking", deadline_packet_tracking_test },
     { "deadline_smart_retransmit", deadline_smart_retransmit_test },
+    { "deadline_fairness", deadline_fairness_test },
+    { "deadline_integration", deadline_integration_test },
     { "stress", stress_test },
     { "fuzz", fuzz_test },
     { "fuzz_initial", fuzz_initial_test},

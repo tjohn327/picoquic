@@ -75,6 +75,21 @@ int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id,
     return ret;
 }
 
+/* Configure fairness parameters for deadline-aware scheduling */
+void picoquic_set_deadline_fairness_params(picoquic_cnx_t* cnx,
+    double min_non_deadline_share, uint64_t max_starvation_time_us)
+{
+    if (cnx != NULL && cnx->deadline_context != NULL) {
+        /* Validate parameters */
+        if (min_non_deadline_share >= 0.0 && min_non_deadline_share <= 1.0) {
+            cnx->deadline_context->min_non_deadline_share = min_non_deadline_share;
+        }
+        if (max_starvation_time_us > 0) {
+            cnx->deadline_context->max_starvation_time = max_starvation_time_us;
+        }
+    }
+}
+
 /* Queue a DEADLINE_CONTROL frame for transmission */
 int picoquic_queue_deadline_control_frame(picoquic_cnx_t* cnx, uint64_t stream_id, 
     uint64_t deadline_ms)
@@ -514,13 +529,42 @@ int picoquic_is_stream_data_dropped(picoquic_stream_head_t* stream, uint64_t off
     return 0;
 }
 
-/* Find ready stream using EDF (Earliest Deadline First) scheduling */
+/* Find ready stream using EDF (Earliest Deadline First) scheduling with fairness */
 picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, picoquic_path_t* path_x)
 {
     picoquic_stream_head_t* stream = cnx->first_output_stream;
     picoquic_stream_head_t* best_stream = NULL;
+    picoquic_stream_head_t* best_non_deadline_stream = NULL;
     uint64_t earliest_deadline = UINT64_MAX;
     uint64_t current_time = picoquic_get_quic_time(cnx->quic);
+    
+    /* Check if fairness enforcement is needed */
+    int force_non_deadline = 0;
+    if (cnx->deadline_context != NULL) {
+        /* Check for starvation timeout */
+        if (cnx->deadline_context->last_non_deadline_scheduled > 0 &&
+            current_time > cnx->deadline_context->last_non_deadline_scheduled + 
+            cnx->deadline_context->max_starvation_time) {
+            force_non_deadline = 1;
+        }
+        
+        /* Check bandwidth share in current window */
+        uint64_t window_duration = current_time - cnx->deadline_context->window_start_time;
+        if (window_duration > 100000) { /* 100ms window */
+            uint64_t total_bytes = cnx->deadline_context->deadline_bytes_sent + 
+                                 cnx->deadline_context->non_deadline_bytes_sent;
+            if (total_bytes > 0) {
+                double non_deadline_share = (double)cnx->deadline_context->non_deadline_bytes_sent / total_bytes;
+                if (non_deadline_share < cnx->deadline_context->min_non_deadline_share) {
+                    force_non_deadline = 1;
+                }
+            }
+            /* Reset window */
+            cnx->deadline_context->window_start_time = current_time;
+            cnx->deadline_context->deadline_bytes_sent = 0;
+            cnx->deadline_context->non_deadline_bytes_sent = 0;
+        }
+    }
     
     /* First pass: find stream with earliest deadline that has data to send */
     while (stream != NULL) {
@@ -565,19 +609,24 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
                     stream->deadline_ctx->deadline_type == 1) {
                     /* This data should be dropped, not sent */
                     has_data = 0;
-                } else if (stream->deadline_ctx->absolute_deadline < earliest_deadline) {
+                } else if (!force_non_deadline && stream->deadline_ctx->absolute_deadline < earliest_deadline) {
                     earliest_deadline = stream->deadline_ctx->absolute_deadline;
                     best_stream = stream;
                 }
-            } else if (best_stream == NULL || 
-                      (best_stream->deadline_ctx == NULL || !best_stream->deadline_ctx->deadline_enabled)) {
-                /* Non-deadline streams are considered after deadline streams */
-                /* Use original priority/round-robin logic for non-deadline streams */
-                if ((stream->stream_priority & 1) != 0) {
+            } else {
+                /* Track best non-deadline stream */
+                if (best_non_deadline_stream == NULL) {
+                    best_non_deadline_stream = stream;
+                } else if ((stream->stream_priority & 1) != 0) {
                     /* FIFO processing */
-                    best_stream = stream;
-                } else if (stream->last_time_data_sent < best_stream->last_time_data_sent) {
+                    best_non_deadline_stream = stream;
+                } else if (stream->last_time_data_sent < best_non_deadline_stream->last_time_data_sent) {
                     /* Round-robin */
+                    best_non_deadline_stream = stream;
+                }
+                
+                /* Select non-deadline stream if no deadline stream found yet or fairness forces it */
+                if (best_stream == NULL || force_non_deadline) {
                     best_stream = stream;
                 }
             }
@@ -600,6 +649,23 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
         }
         
         stream = next_stream;
+    }
+    
+    /* Apply fairness logic if needed */
+    if (force_non_deadline && best_non_deadline_stream != NULL) {
+        best_stream = best_non_deadline_stream;
+    }
+    
+    /* Update fairness tracking */
+    if (cnx->deadline_context != NULL && best_stream != NULL) {
+        if (best_stream->deadline_ctx != NULL && best_stream->deadline_ctx->deadline_enabled) {
+            /* Selected a deadline stream */
+            cnx->deadline_context->deadline_bytes_sent += PICOQUIC_MIN_SEGMENT_SIZE; /* Approximate */
+        } else {
+            /* Selected a non-deadline stream */
+            cnx->deadline_context->non_deadline_bytes_sent += PICOQUIC_MIN_SEGMENT_SIZE; /* Approximate */
+            cnx->deadline_context->last_non_deadline_scheduled = current_time;
+        }
     }
     
     return best_stream;

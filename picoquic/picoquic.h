@@ -1323,6 +1323,11 @@ int picoquic_mark_high_priority_stream(picoquic_cnx_t* cnx,
 int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, 
     uint64_t deadline_ms, int is_hard);
 
+/* Configure fairness parameters for deadline-aware scheduling */
+void picoquic_set_deadline_fairness_params(picoquic_cnx_t* cnx,
+    double min_non_deadline_share,  /* Minimum bandwidth share for non-deadline streams (0.0-1.0) */
+    uint64_t max_starvation_time_us /* Maximum time non-deadline streams can be starved (microseconds) */);
+
 /* 
 * Handling of datagram priorities
 * 

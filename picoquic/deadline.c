@@ -548,6 +548,29 @@ int picoquic_is_stream_data_dropped(picoquic_stream_head_t* stream, uint64_t off
  * are considered to have similar urgency and are scheduled round-robin */
 #define DEADLINE_PROXIMITY_THRESHOLD_US 10000
 
+/* Find the first non-expired chunk in a stream's send queue */
+static picoquic_stream_queue_node_t* picoquic_find_first_valid_chunk(picoquic_stream_head_t* stream, uint64_t current_time)
+{
+    if (stream == NULL || stream->send_queue == NULL || stream->deadline_ctx == NULL) {
+        return stream ? stream->send_queue : NULL;
+    }
+    
+    /* For soft deadlines or non-deadline streams, all chunks are valid */
+    if (!stream->deadline_ctx->deadline_enabled || stream->deadline_ctx->deadline_type == 0) {
+        return stream->send_queue;
+    }
+    
+    /* For hard deadlines, skip expired chunks */
+    picoquic_stream_queue_node_t* chunk = stream->send_queue;
+    while (chunk != NULL && 
+           chunk->chunk_deadline != UINT64_MAX &&
+           current_time >= chunk->chunk_deadline) {
+        chunk = chunk->next_stream_data;
+    }
+    
+    return chunk;
+}
+
 /* Find ready stream using EDF (Earliest Deadline First) scheduling with fairness */
 picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, picoquic_path_t* path_x)
 {
@@ -634,35 +657,42 @@ picoquic_stream_head_t* picoquic_find_ready_stream_edf(picoquic_cnx_t* cnx, pico
             }
             /* For deadline-aware streams */
             if (stream->deadline_ctx != NULL && stream->deadline_ctx->deadline_enabled) {
-                /* Skip if deadline already passed and it's a hard deadline */
-                if (current_time >= stream->deadline_ctx->absolute_deadline && 
-                    stream->deadline_ctx->deadline_type == 1) {
-                    /* This data should be dropped, not sent */
+                /* Find the first non-expired chunk for per-chunk deadlines */
+                picoquic_stream_queue_node_t* first_valid_chunk = picoquic_find_first_valid_chunk(stream, current_time);
+                
+                /* If all chunks are expired, stream has no valid data */
+                if (stream->send_queue != NULL && first_valid_chunk == NULL) {
                     has_data = 0;
                     if (should_debug) {
-                        DBG_PRINTF("  Stream %lu: deadline expired, dropping data\n", stream->stream_id);
+                        DBG_PRINTF("  Stream %lu: all chunks expired, no data to send\n", stream->stream_id);
                     }
                 }
                 
                 /* Process deadline stream if it still has data and we're not forcing non-deadline */
                 if (has_data && !force_non_deadline) {
+                    /* Get the deadline of the first non-expired chunk */
+                    uint64_t effective_deadline = stream->deadline_ctx->absolute_deadline;
+                    if (first_valid_chunk != NULL && first_valid_chunk->chunk_deadline != UINT64_MAX) {
+                        effective_deadline = first_valid_chunk->chunk_deadline;
+                    }
+                    
                     if (should_debug) {
-                        printf("[EDF]     Processing deadline stream %lu, absolute_deadline=%lu, earliest=%lu\n",
-                            stream->stream_id, stream->deadline_ctx->absolute_deadline, earliest_deadline);
+                        printf("[EDF]     Processing deadline stream %lu, effective_deadline=%lu, earliest=%lu\n",
+                            stream->stream_id, effective_deadline, earliest_deadline);
                     }
                     /* Check if this stream has a deadline close to the earliest we've seen */
                     uint64_t deadline_threshold = (earliest_deadline == UINT64_MAX) ? UINT64_MAX : 
                                                   (earliest_deadline + DEADLINE_PROXIMITY_THRESHOLD_US);
-                    if (stream->deadline_ctx->absolute_deadline <= deadline_threshold) {
+                    if (effective_deadline <= deadline_threshold) {
                         /* This stream is in the same urgency group */
-                        if (stream->deadline_ctx->absolute_deadline < earliest_deadline) {
+                        if (effective_deadline < earliest_deadline) {
                             /* New earliest deadline - reset the group */
-                            earliest_deadline = stream->deadline_ctx->absolute_deadline;
+                            earliest_deadline = effective_deadline;
                             oldest_send_time = stream->last_time_data_sent;
                             earliest_not_sent_recently = stream;
                             if (should_debug) {
                                 printf("[EDF]     Stream %lu: NEW earliest deadline (%lu), last_send=%lu\n",
-                                    stream->stream_id, stream->deadline_ctx->absolute_deadline, 
+                                    stream->stream_id, effective_deadline, 
                                     stream->last_time_data_sent);
                             }
                         } else if (stream->last_time_data_sent <= oldest_send_time) {
@@ -752,70 +782,128 @@ void picoquic_skip_dropped_stream_data(picoquic_stream_head_t* stream)
         return;
     }
     
+    picoquic_cnx_t* cnx = stream->cnx;
+    uint64_t current_time = picoquic_get_quic_time(cnx->quic);
     picoquic_stream_queue_node_t* current = stream->send_queue;
     picoquic_stream_queue_node_t* prev = NULL;
+    uint64_t stream_offset = stream->sent_offset;
     
     while (current != NULL) {
-        uint64_t node_start = current->offset;
-        uint64_t node_end = current->offset + current->length;
-        uint64_t skip_offset = current->offset;
+        int should_drop = 0;
+        uint64_t drop_start = 0;
+        uint64_t drop_length = 0;
         
-        /* Check if any part of this node is dropped */
-        picosplay_node_t* drop_node = picosplay_first(&stream->deadline_ctx->dropped_ranges.ack_tree);
-        
-        while (drop_node != NULL && skip_offset < node_end) {
-            picoquic_sack_item_t* drop_range = (picoquic_sack_item_t*)((char*)drop_node - offsetof(struct st_picoquic_sack_item_t, node));
+        /* First, check if this chunk has expired based on per-chunk deadline */
+        if (stream->deadline_ctx->deadline_type == 1 && /* hard deadline */
+            current->chunk_deadline != UINT64_MAX &&
+            current_time >= current->chunk_deadline) {
+            /* This chunk has expired - drop it entirely */
+            should_drop = 1;
+            drop_start = stream_offset;
+            drop_length = current->length - current->offset;
             
-            /* If drop range is completely after current node, we're done */
-            if (drop_range->start_of_sack_range >= node_end) {
-                break;
-            }
-            
-            /* If drop range overlaps with current position */
-            if (drop_range->end_of_sack_range > skip_offset && 
-                drop_range->start_of_sack_range < node_end) {
-                
-                /* Calculate how much to skip */
-                uint64_t skip_start = (drop_range->start_of_sack_range > skip_offset) ? 
-                                     drop_range->start_of_sack_range : skip_offset;
-                uint64_t skip_end = (drop_range->end_of_sack_range < node_end) ? 
-                                   drop_range->end_of_sack_range : node_end;
-                
-                if (skip_start == node_start && skip_end == node_end) {
-                    /* Entire node is dropped, remove it */
-                    picoquic_stream_queue_node_t* to_remove = current;
-                    current = current->next_stream_data;
-                    
-                    if (prev == NULL) {
-                        stream->send_queue = current;
-                    } else {
-                        prev->next_stream_data = current;
-                    }
-                    
-                    if (to_remove->bytes != NULL) {
-                        free(to_remove->bytes);
-                    }
-                    free(to_remove);
-                    
-                    /* Continue with next node without updating prev */
-                    goto next_node;
-                } else if (skip_start == node_start) {
-                    /* Drop from beginning, adjust offset */
-                    uint64_t skip_amount = skip_end - skip_start;
-                    current->offset += skip_amount;
-                    current->length -= skip_amount;
-                    skip_offset = skip_end;
-                } else {
-                    /* Drop in middle or end - for now, just advance skip_offset */
-                    skip_offset = skip_end;
-                }
-            }
-            
-            drop_node = picosplay_next(drop_node);
+            DBG_PRINTF("Stream %lu: Dropping expired chunk at offset %lu, length %lu (deadline was %lu, now %lu)\n",
+                stream->stream_id, drop_start, drop_length, 
+                current->chunk_deadline, current_time);
         }
         
-        prev = current;
-        current = current->next_stream_data;
+        if (should_drop) {
+            /* Record the dropped range */
+            picoquic_update_sack_list(&stream->deadline_ctx->dropped_ranges,
+                drop_start, drop_start + drop_length, current_time);
+            
+            /* Queue STREAM_DATA_DROPPED frame */
+            if (cnx->remote_parameters.enable_deadline_aware_streams) {
+                picoquic_queue_stream_data_dropped_frame(cnx, stream->stream_id,
+                    drop_start, drop_length);
+            }
+            
+            /* Update statistics */
+            stream->deadline_ctx->bytes_dropped += drop_length;
+            
+            /* Remove the expired chunk */
+            picoquic_stream_queue_node_t* to_remove = current;
+            current = current->next_stream_data;
+            
+            if (prev == NULL) {
+                stream->send_queue = current;
+            } else {
+                prev->next_stream_data = current;
+            }
+            
+            if (to_remove->bytes != NULL) {
+                free(to_remove->bytes);
+            }
+            free(to_remove);
+            
+            /* Update the stream offset for the dropped data */
+            stream_offset += drop_length;
+        } else {
+            /* Also check against existing dropped ranges (for compatibility) */
+            uint64_t node_start = current->offset;
+            uint64_t node_end = current->offset + current->length;
+            uint64_t skip_offset = current->offset;
+            
+            /* Check if any part of this node is in dropped ranges */
+            picosplay_node_t* drop_node = picosplay_first(&stream->deadline_ctx->dropped_ranges.ack_tree);
+            
+            while (drop_node != NULL && skip_offset < node_end) {
+                picoquic_sack_item_t* drop_range = (picoquic_sack_item_t*)((char*)drop_node - offsetof(struct st_picoquic_sack_item_t, node));
+                
+                /* If drop range is completely after current node, we're done */
+                if (drop_range->start_of_sack_range >= stream_offset + node_end - node_start) {
+                    break;
+                }
+                
+                /* If drop range overlaps with current position */
+                if (drop_range->end_of_sack_range > stream_offset + skip_offset - node_start && 
+                    drop_range->start_of_sack_range < stream_offset + node_end - node_start) {
+                    
+                    /* Calculate how much to skip */
+                    uint64_t skip_start = (drop_range->start_of_sack_range > stream_offset + skip_offset - node_start) ? 
+                                         drop_range->start_of_sack_range - stream_offset + node_start : skip_offset;
+                    uint64_t skip_end = (drop_range->end_of_sack_range < stream_offset + node_end - node_start) ? 
+                                       drop_range->end_of_sack_range - stream_offset + node_start : node_end;
+                    
+                    if (skip_start == node_start && skip_end == node_end) {
+                        /* Entire node is dropped, remove it */
+                        picoquic_stream_queue_node_t* to_remove = current;
+                        current = current->next_stream_data;
+                        
+                        if (prev == NULL) {
+                            stream->send_queue = current;
+                        } else {
+                            prev->next_stream_data = current;
+                        }
+                        
+                        if (to_remove->bytes != NULL) {
+                            free(to_remove->bytes);
+                        }
+                        free(to_remove);
+                        
+                        /* Update stream offset and continue without updating prev */
+                        stream_offset += node_end - node_start;
+                        goto next_node;
+                    } else if (skip_start == node_start) {
+                        /* Drop from beginning, adjust offset */
+                        uint64_t skip_amount = skip_end - skip_start;
+                        current->offset += skip_amount;
+                        current->length -= skip_amount;
+                        skip_offset = skip_end;
+                    } else {
+                        /* Drop in middle or end - for now, just advance skip_offset */
+                        skip_offset = skip_end;
+                    }
+                }
+                
+                drop_node = picosplay_next(drop_node);
+            }
+            
+            /* Move to next chunk */
+            stream_offset += current->length - current->offset;
+            prev = current;
+            current = current->next_stream_data;
+        }
         
 next_node:
         ; /* Empty statement for label */
@@ -941,6 +1029,52 @@ uint64_t picoquic_skip_dropped_ranges(picoquic_sack_list_t* dropped_ranges, uint
     return offset;
 }
 
+/* Helper function to find the earliest deadline for specific data range in a stream */
+static uint64_t picoquic_get_packet_data_deadline(picoquic_stream_head_t* stream, 
+    uint64_t offset, size_t length)
+{
+    uint64_t earliest = UINT64_MAX;
+    uint64_t end_offset = offset + length;
+    
+    if (stream == NULL || stream->deadline_ctx == NULL || !stream->deadline_ctx->deadline_enabled) {
+        return earliest;
+    }
+    
+    /* If per-chunk deadlines aren't being used, return stream deadline */
+    if (stream->send_queue == NULL) {
+        return stream->deadline_ctx->absolute_deadline;
+    }
+    
+    /* Find chunks that overlap with the packet data range */
+    picoquic_stream_queue_node_t* node = stream->send_queue;
+    while (node != NULL) {
+        uint64_t chunk_start = node->offset;
+        uint64_t chunk_end = node->offset + node->length;
+        
+        /* Check if this chunk overlaps with the packet data */
+        if (chunk_start < end_offset && chunk_end > offset) {
+            /* This chunk is at least partially in the packet */
+            if (node->chunk_deadline != UINT64_MAX && node->chunk_deadline < earliest) {
+                earliest = node->chunk_deadline;
+            }
+        }
+        
+        /* If we've passed the relevant range, we can stop */
+        if (chunk_start >= end_offset) {
+            break;
+        }
+        
+        node = node->next_stream_data;
+    }
+    
+    /* If no chunk deadlines found, fall back to stream deadline */
+    if (earliest == UINT64_MAX && stream->deadline_ctx->absolute_deadline != 0) {
+        earliest = stream->deadline_ctx->absolute_deadline;
+    }
+    
+    return earliest;
+}
+
 /* Update packet deadline tracking based on stream data in packet */
 void picoquic_update_packet_deadline_info(picoquic_cnx_t* cnx, picoquic_packet_t* packet, uint64_t current_time)
 {
@@ -952,12 +1086,20 @@ void picoquic_update_packet_deadline_info(picoquic_cnx_t* cnx, picoquic_packet_t
     packet->earliest_deadline = UINT64_MAX;
     packet->contains_deadline_data = 0;
     
-    /* If packet has stream data, check the stream's deadline */
+    /* If packet has stream data, check the specific chunk deadlines */
     if (packet->data_repeat_stream_id != (uint64_t)-1) {
         picoquic_stream_head_t* stream = picoquic_find_stream(cnx, packet->data_repeat_stream_id);
         if (stream != NULL && stream->deadline_ctx != NULL && stream->deadline_ctx->deadline_enabled) {
             packet->contains_deadline_data = 1;
-            packet->earliest_deadline = stream->deadline_ctx->absolute_deadline;
+            
+            /* Use per-chunk deadline if we have offset/length info */
+            if (packet->data_repeat_stream_data_length > 0) {
+                packet->earliest_deadline = picoquic_get_packet_data_deadline(stream,
+                    packet->data_repeat_stream_offset, packet->data_repeat_stream_data_length);
+            } else {
+                /* Fallback to stream deadline if no specific range info */
+                packet->earliest_deadline = stream->deadline_ctx->absolute_deadline;
+            }
         }
     }
     
@@ -981,8 +1123,15 @@ int picoquic_should_skip_packet_retransmit(picoquic_cnx_t* cnx, picoquic_packet_
             picoquic_stream_head_t* stream = picoquic_find_stream(cnx, packet->data_repeat_stream_id);
             if (stream != NULL && stream->deadline_ctx != NULL && 
                 stream->deadline_ctx->deadline_type == 1) {
-                /* Hard deadline expired - skip retransmission */
-                return 1;
+                /* Hard deadline - need to check if ALL chunks in packet are expired */
+                if (packet->data_repeat_stream_data_length > 0) {
+                    /* For per-chunk deadlines, we've already computed the earliest deadline
+                     * If that's expired and it's a hard deadline, skip retransmission */
+                    return 1;
+                } else {
+                    /* No specific range, use stream-level deadline */
+                    return (current_time >= stream->deadline_ctx->absolute_deadline) ? 1 : 0;
+                }
             }
         }
     }

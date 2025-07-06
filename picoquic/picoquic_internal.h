@@ -378,6 +378,9 @@ typedef struct st_picoquic_stream_queue_node_t {
     uint64_t offset;  /* Stream offset of the first octet in "bytes" */
     size_t length;    /* Number of octets in "bytes" */
     uint8_t* bytes;
+    /* Deadline-aware fields for per-chunk deadlines */
+    uint64_t enqueue_time;     /* Time when this chunk was added (microseconds) */
+    uint64_t chunk_deadline;   /* Absolute deadline for this chunk (microseconds) */
 } picoquic_stream_queue_node_t;
 
 /*

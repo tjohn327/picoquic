@@ -250,6 +250,17 @@ int picoquic_add_to_stream_with_ctx(picoquic_cnx_t* cnx, uint64_t stream_id,
                 stream_data->length = length;
                 stream_data->offset = 0;
                 stream_data->next_stream_data = NULL;
+                
+                /* Set per-chunk deadline if stream has deadline enabled */
+                stream_data->enqueue_time = picoquic_get_quic_time(cnx->quic);
+                if (stream->deadline_ctx != NULL && stream->deadline_ctx->deadline_enabled) {
+                    /* Each chunk gets its own deadline based on when it was enqueued */
+                    stream_data->chunk_deadline = stream_data->enqueue_time + 
+                        (stream->deadline_ctx->deadline_ms * 1000);
+                } else {
+                    /* No deadline for this chunk */
+                    stream_data->chunk_deadline = UINT64_MAX;
+                }
 
                 while (next != NULL) {
                     pprevious = &next->next_stream_data;

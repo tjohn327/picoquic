@@ -513,6 +513,8 @@ static const picoquic_test_def_t test_table[] = {
     { "receive_timestamp", receive_timestamp_test },
     { "deadline", deadline_test },
     { "deadline_edf", deadline_edf_test },
+    { "deadline_per_chunk", deadline_per_chunk_test },
+    { "deadline_per_chunk_verify", deadline_per_chunk_verify_test },
     { "deadline_partial_reliability", deadline_partial_reliability_test },
     { "deadline_path_selection", deadline_path_selection_test },
     { "deadline_packet_tracking", deadline_packet_tracking_test },

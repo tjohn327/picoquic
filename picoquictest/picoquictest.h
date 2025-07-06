@@ -611,6 +611,8 @@ int bbr_deadline_probe_skip_test();
 int bbr_deadline_fairness_test();
 int bbr_deadline_e2e_test();
 int deadline_comprehensive_e2e_test();
+int deadline_per_chunk_test();
+int deadline_per_chunk_verify_test();
 
 #ifdef __cplusplus
 }

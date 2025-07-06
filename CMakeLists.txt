@@ -187,6 +187,8 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/bbr_deadline_test.c
     picoquictest/bbr_deadline_e2e_test.c
     picoquictest/deadline_comprehensive_e2e_test.c
+    picoquictest/deadline_per_chunk_test.c
+    picoquictest/deadline_per_chunk_verify_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c
@@ -495,6 +497,12 @@ if(BUILD_TESTING AND picoquic_BUILD_TESTS)
     target_link_libraries(deadline_demo PRIVATE picoquic-log picoquic-core)
     target_include_directories(deadline_demo PRIVATE loglib picoquic)
     set_picoquic_compile_settings(deadline_demo)
+    
+    add_executable(deadline_demo_v2
+        picoquicfirst/deadline_demo_v2.c)
+    target_link_libraries(deadline_demo_v2 PRIVATE picoquic-log picoquic-core)
+    target_include_directories(deadline_demo_v2 PRIVATE loglib picoquic)
+    set_picoquic_compile_settings(deadline_demo_v2)
 
 endif()
 
@@ -589,3 +597,42 @@ configure_package_config_file(${PROJECT_NAME}-config.cmake.in ${CMAKE_CURRENT_BI
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}-config-version.cmake VERSION ${PROJECT_VERSION} COMPATIBILITY ExactVersion)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}-config.cmake ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}-config-version.cmake DESTINATION ${INSTALL_CONFIG_DIR})
+
+add_executable(deadline_minimal deadline_minimal.c)
+target_link_libraries(deadline_minimal picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(deadline_demo_extended picoquicfirst/deadline_demo_extended.c)
+target_link_libraries(deadline_demo_extended picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_deadline_debug test_deadline_debug.c)
+target_link_libraries(test_deadline_debug picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_deadline_multistream test_deadline_multistream.c)
+target_link_libraries(test_deadline_multistream picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_deadline_continuous test_deadline_continuous.c)
+target_link_libraries(test_deadline_continuous picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_no_deadline test_no_deadline.c)
+target_link_libraries(test_no_deadline picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_stream_scheduling test_stream_scheduling.c)
+target_link_libraries(test_stream_scheduling picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_stream_fixed test_stream_fixed.c)
+target_link_libraries(test_stream_fixed picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_no_edf test_no_edf.c)
+target_link_libraries(test_no_edf picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_edf_fixed test_edf_fixed.c)
+target_link_libraries(test_edf_fixed picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_edf_debug test_edf_debug.c)
+target_link_libraries(test_edf_debug picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_edf_minimal test_edf_minimal.c)
+target_link_libraries(test_edf_minimal picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(test_edf_verify test_edf_verify.c)
+target_link_libraries(test_edf_verify picoquic-core picoquic-log ${PTLS_LIBRARIES} ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})

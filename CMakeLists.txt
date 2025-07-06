@@ -490,6 +490,12 @@ if(BUILD_TESTING AND picoquic_BUILD_TESTS)
     target_include_directories(thread_test PRIVATE loglib picoquic)
     set_picoquic_compile_settings(thread_test)
 
+    add_executable(deadline_demo
+        picoquicfirst/deadline_demo.c)
+    target_link_libraries(deadline_demo PRIVATE picoquic-log picoquic-core)
+    target_include_directories(deadline_demo PRIVATE loglib picoquic)
+    set_picoquic_compile_settings(deadline_demo)
+
 endif()
 
 # get all project files for formatting

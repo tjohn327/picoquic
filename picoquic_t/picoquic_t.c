@@ -533,6 +533,7 @@ static const picoquic_test_def_t test_table[] = {
     { "bbr_deadline_probe_skip", bbr_deadline_probe_skip_test },
     { "bbr_deadline_fairness", bbr_deadline_fairness_test },
     { "bbr_deadline_e2e", bbr_deadline_e2e_test },
+    { "deadline_comprehensive_e2e", deadline_comprehensive_e2e_test },
     { "stress", stress_test },
     { "fuzz", fuzz_test },
     { "fuzz_initial", fuzz_initial_test},

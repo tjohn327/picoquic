@@ -186,6 +186,7 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/deadline_debug_test.c
     picoquictest/bbr_deadline_test.c
     picoquictest/bbr_deadline_e2e_test.c
+    picoquictest/deadline_comprehensive_e2e_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c

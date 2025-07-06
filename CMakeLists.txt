@@ -176,6 +176,11 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/deadline_smart_retransmit_test.c
     picoquictest/deadline_fairness_test.c
     picoquictest/deadline_integration_test.c
+    picoquictest/deadline_basic_e2e_test.c
+    picoquictest/deadline_e2e_test.c
+    picoquictest/deadline_network_sim_test.c
+    picoquictest/deadline_simple_test.c
+    picoquictest/deadline_minimal_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c

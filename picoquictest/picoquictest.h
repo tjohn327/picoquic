@@ -594,6 +594,14 @@ int deadline_partial_reliability_test();
 int deadline_path_selection_test();
 int deadline_packet_tracking_test();
 int deadline_smart_retransmit_test();
+int deadline_fairness_test();
+int deadline_integration_test();
+int deadline_basic_e2e_test();
+int deadline_e2e_test();
+int deadline_network_sim_test();
+int deadline_network_transition_test();
+int deadline_simple_test();
+int deadline_minimal_test();
 
 #ifdef __cplusplus
 }

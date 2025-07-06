@@ -57,12 +57,12 @@ int deadline_packet_tracking_test()
     
     if (ret == 0) {
         /* Stream 1: 50ms deadline */
-        stream1 = picoquic_create_stream(cnx, 0);
+        stream1 = picoquic_create_stream(cnx, 4);  /* Use stream 4 instead of 0 */
         if (stream1 == NULL) {
             DBG_PRINTF("%s", "Failed to create stream 1\n");
             ret = -1;
         } else {
-            ret = picoquic_set_stream_deadline(cnx, 0, 50, 1); /* 50ms hard deadline */
+            ret = picoquic_set_stream_deadline(cnx, 4, 50, 1); /* 50ms hard deadline */
             if (ret != 0) {
                 DBG_PRINTF("%s", "Failed to set deadline for stream 1\n");
             }
@@ -71,12 +71,12 @@ int deadline_packet_tracking_test()
     
     if (ret == 0) {
         /* Stream 2: 100ms deadline */
-        stream2 = picoquic_create_stream(cnx, 4);
+        stream2 = picoquic_create_stream(cnx, 8);  /* Use stream 8 */
         if (stream2 == NULL) {
             DBG_PRINTF("%s", "Failed to create stream 2\n");
             ret = -1;
         } else {
-            ret = picoquic_set_stream_deadline(cnx, 4, 100, 0); /* 100ms soft deadline */
+            ret = picoquic_set_stream_deadline(cnx, 8, 100, 0); /* 100ms soft deadline */
             if (ret != 0) {
                 DBG_PRINTF("%s", "Failed to set deadline for stream 2\n");
             }
@@ -85,7 +85,7 @@ int deadline_packet_tracking_test()
     
     if (ret == 0) {
         /* Stream 3: No deadline */
-        stream3 = picoquic_create_stream(cnx, 8);
+        stream3 = picoquic_create_stream(cnx, 12);  /* Use stream 12 */
         if (stream3 == NULL) {
             DBG_PRINTF("%s", "Failed to create stream 3\n");
             ret = -1;
@@ -97,12 +97,12 @@ int deadline_packet_tracking_test()
         uint8_t buffer[100];
         memset(buffer, 0x42, sizeof(buffer));
         
-        ret = picoquic_add_to_stream(cnx, 0, buffer, sizeof(buffer), 0);
+        ret = picoquic_add_to_stream(cnx, 4, buffer, sizeof(buffer), 0);  /* Stream 1 */
         if (ret == 0) {
-            ret = picoquic_add_to_stream(cnx, 4, buffer, sizeof(buffer), 0);
+            ret = picoquic_add_to_stream(cnx, 8, buffer, sizeof(buffer), 0);  /* Stream 2 */
         }
         if (ret == 0) {
-            ret = picoquic_add_to_stream(cnx, 8, buffer, sizeof(buffer), 0);
+            ret = picoquic_add_to_stream(cnx, 12, buffer, sizeof(buffer), 0);  /* Stream 3 */
         }
         
         if (ret != 0) {
@@ -119,7 +119,7 @@ int deadline_packet_tracking_test()
             ret = -1;
         } else {
             /* Simulate adding stream 1 data to packet */
-            packet->data_repeat_stream_id = 0;
+            packet->data_repeat_stream_id = 4;  /* Use stream 4 instead of 0 */
             
             /* Update deadline info */
             picoquic_update_packet_deadline_info(cnx, packet, simulated_time);
@@ -148,7 +148,7 @@ int deadline_packet_tracking_test()
             ret = -1;
         } else {
             /* Simulate adding stream 3 data (no deadline) */
-            packet->data_repeat_stream_id = 8;
+            packet->data_repeat_stream_id = 12;  /* Stream 3 has no deadline */
             
             /* Update deadline info */
             picoquic_update_packet_deadline_info(cnx, packet, simulated_time);
@@ -177,7 +177,7 @@ int deadline_packet_tracking_test()
             ret = -1;
         } else {
             /* Simulate adding stream 2 data (soft deadline) */
-            packet->data_repeat_stream_id = 4;
+            packet->data_repeat_stream_id = 8;  /* Stream 2 has 100ms soft deadline */
             
             /* Update deadline info */
             picoquic_update_packet_deadline_info(cnx, packet, simulated_time);

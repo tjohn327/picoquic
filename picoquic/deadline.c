@@ -41,7 +41,22 @@ int picoquic_set_stream_deadline(picoquic_cnx_t* cnx, uint64_t stream_id,
     uint64_t deadline_ms, int is_hard)
 {
     int ret = 0;
-    picoquic_stream_head_t* stream = picoquic_find_stream(cnx, stream_id);
+    picoquic_stream_head_t* stream;
+    
+    /* Stream 0-3 are reserved for special use - don't allow deadline on them
+     * Stream 0: Client-initiated bidirectional (often used for control)
+     * Stream 1: Server-initiated bidirectional 
+     * Stream 2: Client-initiated unidirectional
+     * Stream 3: Server-initiated unidirectional
+     * These streams may have special handling that conflicts with deadline logic.
+     */
+    if (stream_id < 4) {
+        DBG_PRINTF("Cannot set deadline on reserved stream %lu (streams 0-3 are reserved)\n", 
+            (unsigned long)stream_id);
+        return PICOQUIC_ERROR_INVALID_STREAM_ID;
+    }
+    
+    stream = picoquic_find_stream(cnx, stream_id);
     
     if (stream == NULL) {
         /* Create stream if it doesn't exist */

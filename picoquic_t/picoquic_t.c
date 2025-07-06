@@ -525,6 +525,8 @@ static const picoquic_test_def_t test_table[] = {
     { "deadline_network_transition", deadline_network_transition_test },
     { "deadline_simple", deadline_simple_test },
     { "deadline_minimal", deadline_minimal_test },
+    { "deadline_ack", deadline_ack_test },
+    { "deadline_debug", deadline_debug_test },
     { "stress", stress_test },
     { "fuzz", fuzz_test },
     { "fuzz_initial", fuzz_initial_test},

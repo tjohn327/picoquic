@@ -192,10 +192,10 @@ int deadline_e2e_basic_test()
     
     if (ret == 0) {
         /* Create streams */
-        ctx->stream_id_deadline = 0;
-        ctx->stream_id_regular = 4;
+        ctx->stream_id_deadline = 4;  /* Use stream 4 instead of 0 */
+        ctx->stream_id_regular = 8;  /* Use stream 8 instead of 4 */
         
-        /* Set deadline on stream 0 - 50ms hard deadline */
+        /* Set deadline on stream 4 - 50ms hard deadline */
         ret = picoquic_set_stream_deadline(ctx->tls_ctx->cnx_client, 
             ctx->stream_id_deadline, 50, 1);
         
@@ -275,7 +275,7 @@ int deadline_e2e_multipath_test()
         ret = tls_api_one_sim_round(ctx->tls_ctx, &simulated_time, 0, NULL);
         
         /* Create urgent deadline stream */
-        ctx->stream_id_urgent = 0;
+        ctx->stream_id_urgent = 4;  /* Use stream 4 instead of 0 */
         
         /* Set 20ms hard deadline - only fast path can meet this */
         ret = picoquic_set_stream_deadline(ctx->tls_ctx->cnx_client,
@@ -354,7 +354,7 @@ int deadline_e2e_fairness_test()
     if (ret == 0) {
         /* Create multiple streams */
         for (i = 0; i < 10 && ret == 0; i++) {
-            uint64_t stream_id = i * 4;
+            uint64_t stream_id = (i + 1) * 4;  /* Start from stream 4, not 0 */
             
             if (i < 7) {
                 /* 70% deadline streams with 100ms deadline */
@@ -430,7 +430,7 @@ int deadline_e2e_retransmit_test()
     
     if (ret == 0) {
         /* Create deadline stream */
-        ctx->stream_id_deadline = 0;
+        ctx->stream_id_deadline = 4;  /* Use stream 4 instead of 0 */
         ret = picoquic_set_stream_deadline(ctx->tls_ctx->cnx_client,
             ctx->stream_id_deadline, deadline_ms, 1); /* hard deadline */
         
@@ -509,7 +509,7 @@ int deadline_e2e_stress_test()
     if (ret == 0) {
         /* Create many streams with varying deadlines */
         for (i = 0; i < num_streams && ret == 0; i++) {
-            uint64_t stream_id = i * 4;
+            uint64_t stream_id = (i + 1) * 4;  /* Start from stream 4, not 0 */
             uint64_t deadline_ms = 50 + (i % 100); /* 50-150ms deadlines */
             int is_hard = (i % 3) == 0; /* Every third stream has hard deadline */
             

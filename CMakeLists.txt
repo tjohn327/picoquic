@@ -181,6 +181,8 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/deadline_network_sim_test.c
     picoquictest/deadline_simple_test.c
     picoquictest/deadline_minimal_test.c
+    picoquictest/deadline_ack_test.c
+    picoquictest/deadline_debug_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c

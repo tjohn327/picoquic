@@ -76,11 +76,11 @@ int deadline_fairness_test()
     /* Create streams */
     if (ret == 0) {
         /* Create 2 deadline streams */
-        picoquic_stream_head_t* stream0 = picoquic_create_stream(cnx, 0);
-        picoquic_stream_head_t* stream4 = picoquic_create_stream(cnx, 4);
+        picoquic_stream_head_t* stream0 = picoquic_create_stream(cnx, 4);  /* Use stream 4 instead of 0 */
+        picoquic_stream_head_t* stream4 = picoquic_create_stream(cnx, 8);  /* Use stream 8 instead of 4 */
         /* Create 2 non-deadline streams */
-        picoquic_stream_head_t* stream8 = picoquic_create_stream(cnx, 8);
-        picoquic_stream_head_t* stream12 = picoquic_create_stream(cnx, 12);
+        picoquic_stream_head_t* stream8 = picoquic_create_stream(cnx, 12);  /* Use stream 12 instead of 8 */
+        picoquic_stream_head_t* stream12 = picoquic_create_stream(cnx, 16);  /* Use stream 16 instead of 12 */
         
         if (stream0 == NULL || stream4 == NULL || stream8 == NULL || stream12 == NULL) {
             DBG_PRINTF("%s", "Failed to create streams\n");
@@ -93,19 +93,19 @@ int deadline_fairness_test()
             stream12->maxdata_remote = 10000000;
             
             /* Set deadlines on streams 0 and 4 */
-            ret = picoquic_set_stream_deadline(cnx, 0, 100, 0); /* 100ms soft deadline */
+            ret = picoquic_set_stream_deadline(cnx, 4, 100, 0); /* 100ms soft deadline */
             if (ret == 0) {
-                ret = picoquic_set_stream_deadline(cnx, 4, 150, 0); /* 150ms soft deadline */
+                ret = picoquic_set_stream_deadline(cnx, 8, 150, 0); /* 150ms soft deadline */
             }
             
             /* Add data to all streams */
             uint8_t buffer[1000];
             memset(buffer, 0x42, sizeof(buffer));
             for (int i = 0; i < 10 && ret == 0; i++) {
-                ret |= picoquic_add_to_stream(cnx, 0, buffer, sizeof(buffer), 0);
                 ret |= picoquic_add_to_stream(cnx, 4, buffer, sizeof(buffer), 0);
                 ret |= picoquic_add_to_stream(cnx, 8, buffer, sizeof(buffer), 0);
                 ret |= picoquic_add_to_stream(cnx, 12, buffer, sizeof(buffer), 0);
+                ret |= picoquic_add_to_stream(cnx, 16, buffer, sizeof(buffer), 0);
             }
             
             /* Mark all streams as active in output queue */

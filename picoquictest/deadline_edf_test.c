@@ -59,7 +59,7 @@ int deadline_edf_test()
                 ret = -1;
             } else {
                 /* Create multiple streams with different deadlines */
-                uint64_t stream_ids[] = {0, 4, 8};
+                uint64_t stream_ids[] = {4, 8, 12};  /* Use streams 4+ to avoid reserved streams */
                 uint64_t deadlines[] = {100, 50, 150}; /* ms */
                 int is_hard[] = {1, 1, 0};
                 
@@ -100,9 +100,9 @@ int deadline_edf_test()
                     if (selected == NULL) {
                         DBG_PRINTF("%s", "EDF scheduler returned NULL\n");
                         ret = -1;
-                    } else if (selected->stream_id != 4) {
-                        /* Stream 4 has deadline of 50ms, should be selected first */
-                        DBG_PRINTF("EDF selected stream %" PRIu64 " instead of stream 4\n", 
+                    } else if (selected->stream_id != 8) {
+                        /* Stream 8 has deadline of 50ms, should be selected first */
+                        DBG_PRINTF("EDF selected stream %" PRIu64 " instead of stream 8\n", 
                             selected->stream_id);
                         ret = -1;
                     } else {
@@ -116,29 +116,29 @@ int deadline_edf_test()
                         simulated_time += 60 * 1000; /* 60ms */
                         picoquic_check_stream_deadlines(cnx, simulated_time);
                         
-                        /* Stream 4 should have expired (hard deadline at 50ms) */
-                        picoquic_stream_head_t* stream4 = picoquic_find_stream(cnx, 4);
-                        if (stream4 != NULL && stream4->deadline_ctx != NULL) {
-                            if (stream4->deadline_ctx->deadlines_missed != 1) {
-                                DBG_PRINTF("Stream 4 should have missed deadline, but missed count is %" PRIu64 "\n",
-                                    stream4->deadline_ctx->deadlines_missed);
+                        /* Stream 8 should have expired (hard deadline at 50ms) */
+                        picoquic_stream_head_t* stream8 = picoquic_find_stream(cnx, 8);
+                        if (stream8 != NULL && stream8->deadline_ctx != NULL) {
+                            if (stream8->deadline_ctx->deadlines_missed != 1) {
+                                DBG_PRINTF("Stream 8 should have missed deadline, but missed count is %" PRIu64 "\n",
+                                    stream8->deadline_ctx->deadlines_missed);
                                 ret = -1;
-                            } else if (stream4->send_queue != NULL) {
-                                DBG_PRINTF("%s", "Stream 4 data should be dropped but send_queue is not NULL\n");
+                            } else if (stream8->send_queue != NULL) {
+                                DBG_PRINTF("%s", "Stream 8 data should be dropped but send_queue is not NULL\n");
                                 ret = -1;
                             } else {
-                                DBG_PRINTF("%s", "Stream 4 deadline correctly expired and data dropped\n");
+                                DBG_PRINTF("%s", "Stream 8 deadline correctly expired and data dropped\n");
                             }
                         }
                         
-                        /* Now EDF should select stream 0 (deadline 100ms) */
+                        /* Now EDF should select stream 4 (deadline 100ms) */
                         if (ret == 0) {
                             selected = picoquic_find_ready_stream_edf(cnx, cnx->path[0]);
                             if (selected == NULL) {
                                 DBG_PRINTF("%s", "EDF scheduler returned NULL after deadline expiry\n");
                                 ret = -1;
-                            } else if (selected->stream_id != 0) {
-                                DBG_PRINTF("EDF selected stream %" PRIu64 " instead of stream 0\n",
+                            } else if (selected->stream_id != 4) {
+                                DBG_PRINTF("EDF selected stream %" PRIu64 " instead of stream 4\n",
                                     selected->stream_id);
                                 ret = -1;
                             } else {

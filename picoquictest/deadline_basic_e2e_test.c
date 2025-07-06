@@ -104,17 +104,17 @@ int deadline_basic_e2e_test()
     }
     
     if (ret == 0) {
-        /* Set deadline on stream 0 - 30ms hard deadline */
-        ret = picoquic_set_stream_deadline(test_ctx->cnx_client, 0, 30, 1);
+        /* Set deadline on stream 4 (not stream 0 which is crypto) - 30ms hard deadline */
+        ret = picoquic_set_stream_deadline(test_ctx->cnx_client, 4, 30, 1);
         if (ret == 0) {
-            DBG_PRINTF("%s", "Set 30ms hard deadline on stream 0\n");
+            DBG_PRINTF("%s", "Set 30ms hard deadline on stream 4\n");
         }
     }
     
     if (ret == 0) {
-        /* Send data */
+        /* Send data on stream 4 */
         memset(buffer, 0xAB, sizeof(buffer));
-        ret = picoquic_add_to_stream(test_ctx->cnx_client, 0, buffer, sizeof(buffer), 1);
+        ret = picoquic_add_to_stream(test_ctx->cnx_client, 4, buffer, sizeof(buffer), 1);
         if (ret == 0) {
             client_ctx.bytes_sent = sizeof(buffer);
             DBG_PRINTF("Sent %zu bytes on deadline stream\n", sizeof(buffer));

@@ -861,6 +861,17 @@ void picoquic_set_default_address_discovery_mode(picoquic_quic_t* quic, int mode
     }
 }
 
+void picoquic_set_deadline_aware_streams_enabled(picoquic_quic_t* quic, int enabled)
+{
+    quic->default_tp.enable_deadline_aware_streams = enabled ? 1 : 0;
+}
+
+int picoquic_is_deadline_aware_negotiated(picoquic_cnx_t* cnx)
+{
+    return cnx->local_parameters.enable_deadline_aware_streams && 
+           cnx->remote_parameters.enable_deadline_aware_streams;
+}
+
 void picoquic_set_cwin_max(picoquic_quic_t* quic, uint64_t cwin_max)
 {
     quic->cwin_max = (cwin_max == 0) ? UINT64_MAX : cwin_max;

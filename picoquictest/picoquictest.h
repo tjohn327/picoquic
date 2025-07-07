@@ -80,6 +80,7 @@ int tls_api_version_negotiation_test();
 int tls_api_version_invariant_test();
 int test_version_negotiation_spoof();
 int transport_param_test();
+int deadline_transport_param_test();
 int tls_api_sni_test();
 int tls_api_alpn_test();
 int tls_api_wrong_alpn_test();

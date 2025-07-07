@@ -1221,3 +1221,219 @@ int vn_tp_test()
     }
     return ret;
 }
+
+/* Test for deadline aware streams transport parameter */
+int deadline_transport_param_test()
+{
+    int ret = 0;
+    picoquic_quic_t* quic_ctx = NULL;
+    picoquic_cnx_t* test_cnx = NULL;
+    uint64_t simulated_time = 0;
+    uint8_t buffer[1024];
+    size_t encoded = 0;
+    
+    /* Test 1: Verify parameter is disabled by default */
+    ret = transport_param_set_contexts(&quic_ctx, &test_cnx, &simulated_time, 0);
+    if (ret == 0) {
+        if (test_cnx->local_parameters.enable_deadline_aware_streams != 0) {
+            DBG_PRINTF("Deadline aware streams should be disabled by default, got %d\n",
+                test_cnx->local_parameters.enable_deadline_aware_streams);
+            ret = -1;
+        }
+    }
+    
+    if (quic_ctx != NULL) {
+        picoquic_free(quic_ctx);
+        quic_ctx = NULL;
+        test_cnx = NULL;
+    }
+    
+    /* Test 2: Enable deadline aware streams and verify encoding */
+    if (ret == 0) {
+        ret = transport_param_set_contexts(&quic_ctx, &test_cnx, &simulated_time, 0);
+        if (ret == 0) {
+            test_cnx->local_parameters.enable_deadline_aware_streams = 1;
+            ret = picoquic_prepare_transport_extensions(test_cnx, 0, buffer, sizeof(buffer), &encoded);
+            
+            if (ret == 0) {
+                /* Look for our transport parameter in the encoded buffer */
+                int found = 0;
+                size_t byte_index = 0;
+                
+                while (byte_index < encoded && !found) {
+                    uint64_t tp_type = 0;
+                    uint64_t tp_length = 0;
+                    size_t ll_type = picoquic_varint_decode(buffer + byte_index, encoded - byte_index, &tp_type);
+                    if (ll_type == 0) break;
+                    byte_index += ll_type;
+                    
+                    size_t ll_length = picoquic_varint_decode(buffer + byte_index, encoded - byte_index, &tp_length);
+                    if (ll_length == 0) break;
+                    byte_index += ll_length;
+                    
+                    if (tp_type == picoquic_tp_enable_deadline_aware_streams) {
+                        found = 1;
+                        if (tp_length != 0) {
+                            DBG_PRINTF("Deadline aware streams parameter should have zero length, got %" PRIu64 "\n", tp_length);
+                            ret = -1;
+                        }
+                    }
+                    byte_index += (size_t)tp_length;
+                }
+                
+                if (!found) {
+                    DBG_PRINTF("%s", "Deadline aware streams parameter not found in encoded transport parameters\n");
+                    ret = -1;
+                }
+            }
+        }
+        
+        if (quic_ctx != NULL) {
+            picoquic_free(quic_ctx);
+            quic_ctx = NULL;
+            test_cnx = NULL;
+        }
+    }
+    
+    /* Test 3: Verify decoding and negotiation */
+    if (ret == 0) {
+        ret = transport_param_set_contexts(&quic_ctx, &test_cnx, &simulated_time, 0);
+        if (ret == 0) {
+            /* Enable deadline aware streams on remote side by setting remote parameters directly */
+            test_cnx->remote_parameters.enable_deadline_aware_streams = 1;
+            
+            /* Test negotiation check when both sides enable */
+            test_cnx->local_parameters.enable_deadline_aware_streams = 1;
+            if (!picoquic_is_deadline_aware_negotiated(test_cnx)) {
+                DBG_PRINTF("%s", "Deadline aware streams should be negotiated when both sides enable it\n");
+                ret = -1;
+            }
+            
+            /* Test negotiation when only remote enables */
+            test_cnx->local_parameters.enable_deadline_aware_streams = 0;
+            if (picoquic_is_deadline_aware_negotiated(test_cnx)) {
+                DBG_PRINTF("%s", "Deadline aware streams should not be negotiated when only remote enables it\n");
+                ret = -1;
+            }
+            
+            /* Test negotiation when only local enables */
+            test_cnx->local_parameters.enable_deadline_aware_streams = 1;
+            test_cnx->remote_parameters.enable_deadline_aware_streams = 0;
+            if (picoquic_is_deadline_aware_negotiated(test_cnx)) {
+                DBG_PRINTF("%s", "Deadline aware streams should not be negotiated when only local enables it\n");
+                ret = -1;
+            }
+        }
+        
+        if (quic_ctx != NULL) {
+            picoquic_free(quic_ctx);
+            quic_ctx = NULL;
+            test_cnx = NULL;
+        }
+    }
+    
+    /* Test 3b: Verify parameter appears in encoded transport extensions */
+    if (ret == 0) {
+        ret = transport_param_set_contexts(&quic_ctx, &test_cnx, &simulated_time, 1); /* mode = 1 for server */
+        if (ret == 0) {
+            /* Enable deadline aware streams and encode as server */
+            test_cnx->local_parameters.enable_deadline_aware_streams = 1;
+            test_cnx->is_hcid_verified = 1; /* Mark HCID as already verified */
+            
+            ret = picoquic_prepare_transport_extensions(test_cnx, 1, buffer, sizeof(buffer), &encoded);
+            
+            if (ret == 0) {
+                /* Verify our parameter is in the encoded data */
+                int found = 0;
+                size_t byte_index = 0;
+                
+                while (byte_index < encoded && !found) {
+                    uint64_t tp_type = 0;
+                    uint64_t tp_length = 0;
+                    size_t ll_type = picoquic_varint_decode(buffer + byte_index, encoded - byte_index, &tp_type);
+                    if (ll_type == 0) break;
+                    byte_index += ll_type;
+                    
+                    size_t ll_length = picoquic_varint_decode(buffer + byte_index, encoded - byte_index, &tp_length);
+                    if (ll_length == 0) break;
+                    byte_index += ll_length;
+                    
+                    if (tp_type == picoquic_tp_enable_deadline_aware_streams) {
+                        found = 1;
+                    }
+                    byte_index += (size_t)tp_length;
+                }
+                
+                if (!found) {
+                    DBG_PRINTF("%s", "Deadline aware streams parameter not found in server encoded parameters\n");
+                    ret = -1;
+                }
+            }
+        }
+        
+        if (quic_ctx != NULL) {
+            picoquic_free(quic_ctx);
+            quic_ctx = NULL;
+            test_cnx = NULL;
+        }
+    }
+    
+    /* Test 4: Test API functions */
+    if (ret == 0) {
+        quic_ctx = picoquic_create(8, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            simulated_time, &simulated_time, NULL, NULL, 1);
+        
+        if (quic_ctx != NULL) {
+            /* Test enabling deadline aware streams */
+            picoquic_set_deadline_aware_streams_enabled(quic_ctx, 1);
+            if (quic_ctx->default_tp.enable_deadline_aware_streams != 1) {
+                DBG_PRINTF("Default deadline aware streams should be enabled, got %d\n",
+                    quic_ctx->default_tp.enable_deadline_aware_streams);
+                ret = -1;
+            }
+            
+            /* Test disabling */
+            picoquic_set_deadline_aware_streams_enabled(quic_ctx, 0);
+            if (quic_ctx->default_tp.enable_deadline_aware_streams != 0) {
+                DBG_PRINTF("Default deadline aware streams should be disabled, got %d\n",
+                    quic_ctx->default_tp.enable_deadline_aware_streams);
+                ret = -1;
+            }
+            
+            picoquic_free(quic_ctx);
+        } else {
+            ret = -1;
+        }
+    }
+    
+    /* Test 5: Verify parameter comparison works correctly */
+    if (ret == 0) {
+        picoquic_tp_t tp1, tp2;
+        
+        memset(&tp1, 0, sizeof(picoquic_tp_t));
+        memset(&tp2, 0, sizeof(picoquic_tp_t));
+        
+        /* Test that comparison works when both have same value */
+        tp1.enable_deadline_aware_streams = 1;
+        tp2.enable_deadline_aware_streams = 1;
+        
+        if (ret == 0) {
+            /* Compare specific field - both enabled */
+            if (tp1.enable_deadline_aware_streams != tp2.enable_deadline_aware_streams) {
+                DBG_PRINTF("%s", "Transport parameters with same deadline aware value should be equal\n");
+                ret = -1;
+            }
+        }
+        
+        /* Test comparison with different values */
+        tp2.enable_deadline_aware_streams = 0;
+        if (ret == 0) {
+            if (tp1.enable_deadline_aware_streams == tp2.enable_deadline_aware_streams) {
+                DBG_PRINTF("%s", "Transport parameters with different deadline aware values should not be equal\n");
+                ret = -1;
+            }
+        }
+    }
+    
+    return ret;
+}

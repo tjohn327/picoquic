@@ -159,6 +159,7 @@ static const picoquic_test_def_t test_table[] = {
     { "stream_rank", stream_rank_test },
     { "provide_stream_buffer", provide_stream_buffer_test },
     { "transport_param", transport_param_test },
+    { "deadline_transport_param", deadline_transport_param_test },
     { "tls_api_sni", tls_api_sni_test },
     { "tls_api_alpn", tls_api_alpn_test },
     { "tls_api_wrong_alpn", tls_api_wrong_alpn_test },

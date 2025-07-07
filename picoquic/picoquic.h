@@ -329,6 +329,7 @@ typedef struct st_picoquic_tp_t {
     int is_multipath_enabled;
     uint64_t initial_max_path_id;
     int address_discovery_mode; /* 0=none, 1=provide only, 2=receive only, 3=both */
+    int enable_deadline_aware_streams; /* 0=disabled, 1=enabled */
 } picoquic_tp_t;
 
 /*
@@ -664,6 +665,12 @@ void picoquic_set_default_multipath_option(picoquic_quic_t* quic, int multipath_
 
 /* Set the Address Discovery mode for the context */
 void picoquic_set_default_address_discovery_mode(picoquic_quic_t* quic, int mode);
+
+/* Enable deadline-aware streams for the context */
+void picoquic_set_deadline_aware_streams_enabled(picoquic_quic_t* quic, int enabled);
+
+/* Check if deadline-aware streams are negotiated for a connection */
+int picoquic_is_deadline_aware_negotiated(picoquic_cnx_t* cnx);
 
 /** picoquic_set_cwin_max:
  * Set a maximum value for the congestion window (default: UINT64_MAX)

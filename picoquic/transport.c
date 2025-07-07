@@ -466,6 +466,11 @@ int picoquic_prepare_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
             (uint64_t)(cnx->local_parameters.address_discovery_mode - 1));
     }
 
+    if (cnx->local_parameters.enable_deadline_aware_streams != 0 && bytes != NULL) {
+        bytes = picoquic_transport_param_type_flag_encode(bytes, bytes_max,
+            picoquic_tp_enable_deadline_aware_streams);
+    }
+
     /* This test extension must be the last one in the encoding, as it consumes all the available space */
     if (extension_mode == 1 && !cnx->test_large_chello &&
         cnx->quic->test_large_server_flight && bytes != NULL){
@@ -523,6 +528,7 @@ void picoquic_clear_transport_extensions(picoquic_cnx_t* cnx)
     cnx->remote_parameters.do_grease_quic_bit = 0;
     cnx->remote_parameters.enable_bdp_frame = 0;
     cnx->remote_parameters.initial_max_path_id = 0;
+    cnx->remote_parameters.enable_deadline_aware_streams = 0;
 }
 
 int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mode,
@@ -827,6 +833,15 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
                     }
                     break;
                 }
+                case picoquic_tp_enable_deadline_aware_streams:
+                    if (extension_length != 0) {
+                        ret = picoquic_connection_error_ex(cnx, PICOQUIC_TRANSPORT_PARAMETER_ERROR, 0, 
+                            "Enable deadline aware streams TP");
+                    }
+                    else {
+                        cnx->remote_parameters.enable_deadline_aware_streams = 1;
+                    }
+                    break;
                 default:
                     /* ignore unknown extensions */
                     break;

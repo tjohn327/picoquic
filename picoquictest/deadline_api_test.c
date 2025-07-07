@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* Stream descriptor for deadline-aware testing */
 typedef enum {
@@ -37,6 +38,35 @@ typedef struct st_test_api_deadline_stream_desc_t {
     uint64_t previous_stream_id;  /* For chaining stream creation */
 } st_test_api_deadline_stream_desc_t;
 
+/* Statistics for normal streams */
+typedef struct st_normal_stream_stats_t {
+    uint64_t time_to_first_byte;    /* Time from stream creation to first byte received */
+    uint64_t time_to_completion;    /* Time from stream creation to all data received */
+    double throughput_mbps;         /* Average throughput in Mbps */
+    size_t bytes_transferred;       /* Total bytes transferred */
+} normal_stream_stats_t;
+
+/* Statistics for deadline streams */
+typedef struct st_deadline_stream_stats_t {
+    /* Per-chunk statistics */
+    struct {
+        uint64_t send_time;         /* When chunk was sent */
+        uint64_t receive_time;      /* When chunk was received */
+        uint64_t deadline_time;     /* Absolute deadline for this chunk */
+        int deadline_met;           /* 1 if received before deadline, 0 otherwise */
+        uint64_t latency;           /* End-to-end latency for this chunk */
+    } *chunk_stats;
+    int num_chunks;
+    
+    /* Aggregate statistics */
+    double deadline_compliance_percent;  /* Percentage of chunks meeting deadline */
+    double avg_throughput_mbps;         /* Average throughput */
+    double avg_latency_ms;              /* Average chunk latency */
+    double latency_jitter_ms;           /* Standard deviation of latency */
+    uint64_t time_to_first_byte;        /* Time to receive first byte */
+    uint64_t time_to_completion;        /* Time to receive all data */
+} deadline_stream_stats_t;
+
 /* Test context extension for deadline streams */
 typedef struct st_deadline_api_test_ctx_t {
     /* Track per-stream state */
@@ -48,6 +78,12 @@ typedef struct st_deadline_api_test_ctx_t {
         size_t bytes_received;
         uint8_t* send_buffer;
         uint8_t* recv_buffer;
+        /* Timing info */
+        uint64_t stream_created_time;
+        uint64_t first_send_time;
+        uint64_t last_send_time;
+        /* Chunk send times for deadline streams */
+        uint64_t* chunk_send_times;
     } stream_state[32];  /* Max 32 streams for testing */
     
     /* Server-side tracking */
@@ -57,6 +93,17 @@ typedef struct st_deadline_api_test_ctx_t {
         size_t expected_bytes;
         uint8_t* recv_buffer;
         int fin_received;
+        /* Timing info */
+        uint64_t first_byte_time;
+        uint64_t last_byte_time;
+        /* Chunk tracking for deadline streams */
+        int chunks_received;
+        uint64_t* chunk_receive_times;
+        size_t* chunk_sizes;
+        /* Stream type info */
+        st_stream_type_t stream_type;
+        int num_expected_chunks;
+        uint64_t deadline_ms;
     } server_stream_state[32];
     int nb_server_streams;
     
@@ -67,6 +114,10 @@ typedef struct st_deadline_api_test_ctx_t {
     /* Test scenario info */
     st_test_api_deadline_stream_desc_t* scenario;
     size_t nb_scenario;
+    
+    /* Statistics */
+    normal_stream_stats_t* normal_stats[32];
+    deadline_stream_stats_t* deadline_stats[32];
     
     /* Callback contexts */
     test_api_callback_t client_callback;
@@ -119,11 +170,32 @@ static void deadline_api_delete_test_ctx(deadline_api_test_ctx_t* test_ctx)
             if (test_ctx->stream_state[i].recv_buffer != NULL) {
                 free(test_ctx->stream_state[i].recv_buffer);
             }
+            if (test_ctx->stream_state[i].chunk_send_times != NULL) {
+                free(test_ctx->stream_state[i].chunk_send_times);
+            }
         }
         /* Free server-side buffers */
         for (int i = 0; i < test_ctx->nb_server_streams; i++) {
             if (test_ctx->server_stream_state[i].recv_buffer != NULL) {
                 free(test_ctx->server_stream_state[i].recv_buffer);
+            }
+            if (test_ctx->server_stream_state[i].chunk_receive_times != NULL) {
+                free(test_ctx->server_stream_state[i].chunk_receive_times);
+            }
+            if (test_ctx->server_stream_state[i].chunk_sizes != NULL) {
+                free(test_ctx->server_stream_state[i].chunk_sizes);
+            }
+        }
+        /* Free statistics */
+        for (int i = 0; i < 32; i++) {
+            if (test_ctx->normal_stats[i] != NULL) {
+                free(test_ctx->normal_stats[i]);
+            }
+            if (test_ctx->deadline_stats[i] != NULL) {
+                if (test_ctx->deadline_stats[i]->chunk_stats != NULL) {
+                    free(test_ctx->deadline_stats[i]->chunk_stats);
+                }
+                free(test_ctx->deadline_stats[i]);
             }
         }
         free(test_ctx);
@@ -201,17 +273,36 @@ static int deadline_api_callback(picoquic_cnx_t* cnx,
                 deadline_ctx->server_stream_state[server_stream_idx].expected_bytes = 0;
                 deadline_ctx->server_stream_state[server_stream_idx].recv_buffer = NULL;
                 deadline_ctx->server_stream_state[server_stream_idx].fin_received = 0;
+                deadline_ctx->server_stream_state[server_stream_idx].first_byte_time = 0;
+                deadline_ctx->server_stream_state[server_stream_idx].last_byte_time = 0;
+                deadline_ctx->server_stream_state[server_stream_idx].chunks_received = 0;
+                deadline_ctx->server_stream_state[server_stream_idx].chunk_receive_times = NULL;
+                deadline_ctx->server_stream_state[server_stream_idx].chunk_sizes = NULL;
                 
-                /* Calculate expected bytes from scenario */
+                /* Calculate expected bytes from scenario and setup tracking */
                 size_t expected = 0;
                 if (deadline_ctx->scenario != NULL) {
                     for (size_t i = 0; i < deadline_ctx->nb_scenario; i++) {
                         if (deadline_ctx->scenario[i].stream_id == stream_id) {
+                            deadline_ctx->server_stream_state[server_stream_idx].stream_type = 
+                                deadline_ctx->scenario[i].stream_type;
+                            
                             if (deadline_ctx->scenario[i].stream_type == st_stream_type_deadline) {
                                 expected = deadline_ctx->scenario[i].chunk_size * 
                                           deadline_ctx->scenario[i].num_chunks;
+                                deadline_ctx->server_stream_state[server_stream_idx].num_expected_chunks = 
+                                    deadline_ctx->scenario[i].num_chunks;
+                                deadline_ctx->server_stream_state[server_stream_idx].deadline_ms = 
+                                    deadline_ctx->scenario[i].deadline_ms;
+                                    
+                                /* Allocate chunk tracking arrays */
+                                deadline_ctx->server_stream_state[server_stream_idx].chunk_receive_times = 
+                                    (uint64_t*)calloc(deadline_ctx->scenario[i].num_chunks, sizeof(uint64_t));
+                                deadline_ctx->server_stream_state[server_stream_idx].chunk_sizes = 
+                                    (size_t*)calloc(deadline_ctx->scenario[i].num_chunks, sizeof(size_t));
                             } else {
                                 expected = deadline_ctx->scenario[i].len;
+                                deadline_ctx->server_stream_state[server_stream_idx].num_expected_chunks = 0;
                             }
                             break;
                         }
@@ -235,6 +326,14 @@ static int deadline_api_callback(picoquic_cnx_t* cnx,
                 cb_ctx->error_detected |= test_api_fail_data_on_unknown_stream;
                 ret = -1;
             } else if (length > 0) {
+                uint64_t current_time = picoquic_get_quic_time(cnx->quic);
+                
+                /* Track first byte time */
+                if (deadline_ctx->server_stream_state[server_stream_idx].first_byte_time == 0) {
+                    deadline_ctx->server_stream_state[server_stream_idx].first_byte_time = current_time;
+                }
+                deadline_ctx->server_stream_state[server_stream_idx].last_byte_time = current_time;
+                
                 /* Store received data */
                 size_t offset = deadline_ctx->server_stream_state[server_stream_idx].bytes_received;
                 if (deadline_ctx->server_stream_state[server_stream_idx].recv_buffer != NULL &&
@@ -242,10 +341,39 @@ static int deadline_api_callback(picoquic_cnx_t* cnx,
                     memcpy(deadline_ctx->server_stream_state[server_stream_idx].recv_buffer + offset,
                            bytes, length);
                 }
+                
+                /* Track chunks for deadline streams */
+                if (deadline_ctx->server_stream_state[server_stream_idx].stream_type == st_stream_type_deadline &&
+                    deadline_ctx->server_stream_state[server_stream_idx].chunk_receive_times != NULL) {
+                    /* Only count complete chunks based on expected chunk size */
+                    int scenario_idx = -1;
+                    if (deadline_ctx->scenario != NULL) {
+                        for (size_t i = 0; i < deadline_ctx->nb_scenario; i++) {
+                            if (deadline_ctx->scenario[i].stream_id == stream_id) {
+                                scenario_idx = i;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (scenario_idx >= 0) {
+                        size_t expected_chunk_size = deadline_ctx->scenario[scenario_idx].chunk_size;
+                        size_t prev_chunks = deadline_ctx->server_stream_state[server_stream_idx].bytes_received / expected_chunk_size;
+                        size_t new_chunks = (deadline_ctx->server_stream_state[server_stream_idx].bytes_received + length) / expected_chunk_size;
+                        
+                        /* Record time for each newly completed chunk */
+                        for (size_t i = prev_chunks; i < new_chunks && i < deadline_ctx->server_stream_state[server_stream_idx].num_expected_chunks; i++) {
+                            deadline_ctx->server_stream_state[server_stream_idx].chunk_receive_times[i] = current_time;
+                            deadline_ctx->server_stream_state[server_stream_idx].chunk_sizes[i] = expected_chunk_size;
+                            deadline_ctx->server_stream_state[server_stream_idx].chunks_received++;
+                        }
+                    }
+                }
+                
                 deadline_ctx->server_stream_state[server_stream_idx].bytes_received += length;
                 
-                DBG_PRINTF("Server received %zu bytes on stream %lu, total %zu/%zu\n",
-                    length, (unsigned long)stream_id,
+                DBG_PRINTF("Server received %zu bytes on stream %lu at time %lu, total %zu/%zu\n",
+                    length, (unsigned long)stream_id, (unsigned long)current_time,
                     deadline_ctx->server_stream_state[server_stream_idx].bytes_received,
                     deadline_ctx->server_stream_state[server_stream_idx].expected_bytes);
             }
@@ -394,6 +522,9 @@ static int deadline_api_init_streams(picoquic_test_tls_api_ctx_t* test_ctx,
         deadline_ctx->stream_state[idx].next_send_time = *simulated_time;
         deadline_ctx->stream_state[idx].bytes_sent = 0;
         deadline_ctx->stream_state[idx].bytes_received = 0;
+        deadline_ctx->stream_state[idx].stream_created_time = *simulated_time;
+        deadline_ctx->stream_state[idx].first_send_time = 0;
+        deadline_ctx->stream_state[idx].last_send_time = 0;
         
         /* Allocate buffers */
         size_t total_size = (scenario[i].stream_type == st_stream_type_deadline) ?
@@ -401,6 +532,14 @@ static int deadline_api_init_streams(picoquic_test_tls_api_ctx_t* test_ctx,
         
         deadline_ctx->stream_state[idx].send_buffer = (uint8_t*)malloc(total_size);
         deadline_ctx->stream_state[idx].recv_buffer = NULL;
+        
+        /* Allocate chunk send times for deadline streams */
+        if (scenario[i].stream_type == st_stream_type_deadline) {
+            deadline_ctx->stream_state[idx].chunk_send_times = 
+                (uint64_t*)calloc(scenario[i].num_chunks, sizeof(uint64_t));
+        } else {
+            deadline_ctx->stream_state[idx].chunk_send_times = NULL;
+        }
         
         if (deadline_ctx->stream_state[idx].send_buffer == NULL) {
             ret = -1;
@@ -480,6 +619,18 @@ static int deadline_api_data_sending_loop(picoquic_test_tls_api_ctx_t* test_ctx,
                                                     is_fin);
                         
                         if (ret == 0) {
+                            /* Track send time */
+                            if (deadline_ctx->stream_state[i].first_send_time == 0) {
+                                deadline_ctx->stream_state[i].first_send_time = *simulated_time;
+                            }
+                            deadline_ctx->stream_state[i].last_send_time = *simulated_time;
+                            
+                            /* Track chunk send time */
+                            if (deadline_ctx->stream_state[i].chunk_send_times != NULL) {
+                                int chunk_idx = deadline_ctx->stream_state[i].chunks_sent;
+                                deadline_ctx->stream_state[i].chunk_send_times[chunk_idx] = *simulated_time;
+                            }
+                            
                             deadline_ctx->stream_state[i].chunks_sent++;
                             deadline_ctx->stream_state[i].bytes_sent += scenario[scenario_idx].chunk_size;
                             deadline_ctx->stream_state[i].next_send_time = *simulated_time + 
@@ -507,6 +658,11 @@ static int deadline_api_data_sending_loop(picoquic_test_tls_api_ctx_t* test_ctx,
                                                     1); /* Set FIN */
                         
                         if (ret == 0) {
+                            /* Track send time */
+                            if (deadline_ctx->stream_state[i].first_send_time == 0) {
+                                deadline_ctx->stream_state[i].first_send_time = *simulated_time;
+                            }
+                            deadline_ctx->stream_state[i].last_send_time = *simulated_time;
                             deadline_ctx->stream_state[i].bytes_sent = scenario[scenario_idx].len;
                             was_active = 1;
                         }
@@ -573,6 +729,216 @@ static int deadline_api_data_sending_loop(picoquic_test_tls_api_ctx_t* test_ctx,
     }
     
     return ret;
+}
+
+/* Calculate statistics for normal streams */
+static void deadline_api_calculate_normal_stats(deadline_api_test_ctx_t* deadline_ctx, int stream_idx)
+{
+    int server_idx = -1;
+    uint64_t stream_id = deadline_ctx->stream_state[stream_idx].stream_id;
+    
+    /* Find corresponding server stream */
+    for (int i = 0; i < deadline_ctx->nb_server_streams; i++) {
+        if (deadline_ctx->server_stream_state[i].stream_id == stream_id) {
+            server_idx = i;
+            break;
+        }
+    }
+    
+    if (server_idx < 0) return;
+    
+    /* Allocate stats structure */
+    deadline_ctx->normal_stats[stream_idx] = (normal_stream_stats_t*)calloc(1, sizeof(normal_stream_stats_t));
+    if (deadline_ctx->normal_stats[stream_idx] == NULL) return;
+    
+    normal_stream_stats_t* stats = deadline_ctx->normal_stats[stream_idx];
+    
+    /* Calculate time to first byte */
+    stats->time_to_first_byte = deadline_ctx->server_stream_state[server_idx].first_byte_time - 
+                                deadline_ctx->stream_state[stream_idx].first_send_time;
+    
+    /* Calculate time to completion */
+    stats->time_to_completion = deadline_ctx->server_stream_state[server_idx].last_byte_time - 
+                               deadline_ctx->stream_state[stream_idx].first_send_time;
+    
+    /* Calculate throughput */
+    stats->bytes_transferred = deadline_ctx->server_stream_state[server_idx].bytes_received;
+    if (stats->time_to_completion > 0) {
+        /* Convert to Mbps: (bytes * 8) / (microseconds) */
+        stats->throughput_mbps = (stats->bytes_transferred * 8.0) / stats->time_to_completion;
+    }
+}
+
+/* Calculate statistics for deadline streams */
+static void deadline_api_calculate_deadline_stats(deadline_api_test_ctx_t* deadline_ctx, int stream_idx,
+                                                 st_test_api_deadline_stream_desc_t* scenario, size_t nb_scenario)
+{
+    int server_idx = -1;
+    uint64_t stream_id = deadline_ctx->stream_state[stream_idx].stream_id;
+    
+    /* Find corresponding server stream */
+    for (int i = 0; i < deadline_ctx->nb_server_streams; i++) {
+        if (deadline_ctx->server_stream_state[i].stream_id == stream_id) {
+            server_idx = i;
+            break;
+        }
+    }
+    
+    if (server_idx < 0) return;
+    
+    /* Find scenario info */
+    int scenario_idx = -1;
+    for (size_t i = 0; i < nb_scenario; i++) {
+        if (scenario[i].stream_id == stream_id) {
+            scenario_idx = i;
+            break;
+        }
+    }
+    
+    if (scenario_idx < 0) return;
+    
+    /* Allocate stats structure */
+    deadline_ctx->deadline_stats[stream_idx] = (deadline_stream_stats_t*)calloc(1, sizeof(deadline_stream_stats_t));
+    if (deadline_ctx->deadline_stats[stream_idx] == NULL) return;
+    
+    deadline_stream_stats_t* stats = deadline_ctx->deadline_stats[stream_idx];
+    stats->num_chunks = scenario[scenario_idx].num_chunks;
+    
+    /* Allocate chunk stats */
+    stats->chunk_stats = calloc(stats->num_chunks, 
+                               sizeof(struct { uint64_t send_time; uint64_t receive_time; 
+                                              uint64_t deadline_time; int deadline_met; uint64_t latency; }));
+    if (stats->chunk_stats == NULL) return;
+    
+    /* Calculate per-chunk statistics */
+    int deadlines_met = 0;
+    double total_latency = 0;
+    double latency_squared_sum = 0;
+    
+    int chunks_to_analyze = stats->num_chunks;
+    if (chunks_to_analyze > deadline_ctx->server_stream_state[server_idx].chunks_received) {
+        chunks_to_analyze = deadline_ctx->server_stream_state[server_idx].chunks_received;
+    }
+    
+    for (int i = 0; i < chunks_to_analyze; i++) {
+        if (deadline_ctx->stream_state[stream_idx].chunk_send_times != NULL &&
+            deadline_ctx->server_stream_state[server_idx].chunk_receive_times != NULL &&
+            deadline_ctx->stream_state[stream_idx].chunk_send_times[i] > 0 &&
+            deadline_ctx->server_stream_state[server_idx].chunk_receive_times[i] > 0) {
+            
+            stats->chunk_stats[i].send_time = deadline_ctx->stream_state[stream_idx].chunk_send_times[i];
+            stats->chunk_stats[i].receive_time = deadline_ctx->server_stream_state[server_idx].chunk_receive_times[i];
+            stats->chunk_stats[i].deadline_time = stats->chunk_stats[i].send_time + 
+                                                 (scenario[scenario_idx].deadline_ms * 1000);
+            stats->chunk_stats[i].latency = stats->chunk_stats[i].receive_time - stats->chunk_stats[i].send_time;
+            stats->chunk_stats[i].deadline_met = (stats->chunk_stats[i].receive_time <= stats->chunk_stats[i].deadline_time) ? 1 : 0;
+        } else {
+            /* Invalid data, skip this chunk */
+            chunks_to_analyze = i;
+            break;
+        }
+        
+        if (stats->chunk_stats[i].deadline_met) {
+            deadlines_met++;
+        }
+        
+        total_latency += stats->chunk_stats[i].latency;
+        latency_squared_sum += (stats->chunk_stats[i].latency * stats->chunk_stats[i].latency);
+    }
+    
+    /* Calculate aggregate statistics */
+    if (chunks_to_analyze > 0) {
+        stats->deadline_compliance_percent = (deadlines_met * 100.0) / chunks_to_analyze;
+        stats->avg_latency_ms = (total_latency / chunks_to_analyze) / 1000.0;
+        
+        /* Calculate jitter (standard deviation) */
+        if (chunks_to_analyze > 1) {
+            double avg_latency_us = total_latency / chunks_to_analyze;
+            double variance = (latency_squared_sum / chunks_to_analyze) - (avg_latency_us * avg_latency_us);
+            if (variance > 0) {
+                stats->latency_jitter_ms = sqrt(variance) / 1000.0;
+            } else {
+                stats->latency_jitter_ms = 0;
+            }
+        }
+    }
+    
+    /* Update num_chunks to reflect actual analyzed chunks */
+    stats->num_chunks = chunks_to_analyze;
+    
+    /* Time to first byte and completion */
+    stats->time_to_first_byte = deadline_ctx->server_stream_state[server_idx].first_byte_time - 
+                               deadline_ctx->stream_state[stream_idx].first_send_time;
+    stats->time_to_completion = deadline_ctx->server_stream_state[server_idx].last_byte_time - 
+                               deadline_ctx->stream_state[stream_idx].first_send_time;
+    
+    /* Throughput */
+    if (stats->time_to_completion > 0) {
+        stats->avg_throughput_mbps = (deadline_ctx->server_stream_state[server_idx].bytes_received * 8.0) / 
+                                    stats->time_to_completion;
+    }
+}
+
+/* Print statistics report */
+static void deadline_api_print_stats(deadline_api_test_ctx_t* deadline_ctx,
+                                    st_test_api_deadline_stream_desc_t* scenario,
+                                    size_t nb_scenario)
+{
+    DBG_PRINTF("%s:%u:%s: \n======== Stream Statistics Report ========\n", __FILE__, __LINE__, __func__);
+    
+    for (int i = 0; i < deadline_ctx->nb_streams; i++) {
+        uint64_t stream_id = deadline_ctx->stream_state[i].stream_id;
+        
+        /* Find scenario info */
+        int scenario_idx = -1;
+        for (size_t j = 0; j < nb_scenario; j++) {
+            if (scenario[j].stream_id == stream_id) {
+                scenario_idx = j;
+                break;
+            }
+        }
+        
+        if (scenario_idx < 0) continue;
+        
+        DBG_PRINTF("\nStream %lu (%s):\n", (unsigned long)stream_id,
+            scenario[scenario_idx].stream_type == st_stream_type_normal ? "Normal" : "Deadline");
+        
+        if (scenario[scenario_idx].stream_type == st_stream_type_normal && deadline_ctx->normal_stats[i]) {
+            normal_stream_stats_t* stats = deadline_ctx->normal_stats[i];
+            DBG_PRINTF("  Time to first byte: %.2f ms\n", stats->time_to_first_byte / 1000.0);
+            DBG_PRINTF("  Time to completion: %.2f ms\n", stats->time_to_completion / 1000.0);
+            DBG_PRINTF("  Bytes transferred: %zu\n", stats->bytes_transferred);
+            DBG_PRINTF("  Average throughput: %.2f Mbps\n", stats->throughput_mbps);
+        } else if (scenario[scenario_idx].stream_type == st_stream_type_deadline && deadline_ctx->deadline_stats[i]) {
+            deadline_stream_stats_t* stats = deadline_ctx->deadline_stats[i];
+            DBG_PRINTF("  Deadline: %lu ms\n", (unsigned long)scenario[scenario_idx].deadline_ms);
+            DBG_PRINTF("  Deadline compliance: %.1f%% (%d/%d chunks)\n", 
+                stats->deadline_compliance_percent,
+                (int)(stats->deadline_compliance_percent * stats->num_chunks / 100),
+                stats->num_chunks);
+            DBG_PRINTF("  Average latency: %.2f ms\n", stats->avg_latency_ms);
+            DBG_PRINTF("  Latency jitter: %.2f ms\n", stats->latency_jitter_ms);
+            DBG_PRINTF("  Time to first byte: %.2f ms\n", stats->time_to_first_byte / 1000.0);
+            DBG_PRINTF("  Time to completion: %.2f ms\n", stats->time_to_completion / 1000.0);
+            DBG_PRINTF("  Average throughput: %.2f Mbps\n", stats->avg_throughput_mbps);
+            
+            /* Print per-chunk details for deadline violations */
+            int violations = 0;
+            for (int j = 0; j < stats->num_chunks; j++) {
+                if (!stats->chunk_stats[j].deadline_met) {
+                    if (violations == 0) {
+                        DBG_PRINTF("%s:%u:%s:   Deadline violations:\n", __FILE__, __LINE__, __func__);
+                    }
+                    DBG_PRINTF("    Chunk %d: latency %.2f ms (deadline was %.2f ms)\n",
+                        j + 1, stats->chunk_stats[j].latency / 1000.0,
+                        scenario[scenario_idx].deadline_ms);
+                    violations++;
+                }
+            }
+        }
+    }
+    
+    DBG_PRINTF("%s:%u:%s: \n========================================\n", __FILE__, __LINE__, __func__);
 }
 
 /* Verify that all data was received correctly */
@@ -744,6 +1110,33 @@ int deadline_api_test_single_stream()
         }
     }
     
+    /* Calculate and print statistics */
+    if (ret == 0) {
+        size_t nb_scenario = sizeof(test_scenario_single_deadline) / sizeof(st_test_api_deadline_stream_desc_t);
+        
+        /* Calculate stats for each stream */
+        for (int i = 0; i < deadline_ctx->nb_streams; i++) {
+            int scenario_idx = -1;
+            for (size_t j = 0; j < nb_scenario; j++) {
+                if (test_scenario_single_deadline[j].stream_id == deadline_ctx->stream_state[i].stream_id) {
+                    scenario_idx = j;
+                    break;
+                }
+            }
+            
+            if (scenario_idx >= 0) {
+                if (test_scenario_single_deadline[scenario_idx].stream_type == st_stream_type_normal) {
+                    deadline_api_calculate_normal_stats(deadline_ctx, i);
+                } else {
+                    deadline_api_calculate_deadline_stats(deadline_ctx, i, test_scenario_single_deadline, nb_scenario);
+                }
+            }
+        }
+        
+        /* Print statistics report */
+        deadline_api_print_stats(deadline_ctx, test_scenario_single_deadline, nb_scenario);
+    }
+    
     /* Verify all data was received correctly */
     if (ret == 0) {
         ret = deadline_api_verify(test_ctx, deadline_ctx, test_scenario_single_deadline,
@@ -796,6 +1189,33 @@ int deadline_api_test_mixed_streams()
                                     &simulated_time);
     }
     
+    /* Calculate and print statistics */
+    if (ret == 0) {
+        size_t nb_scenario = sizeof(test_scenario_mixed_streams) / sizeof(st_test_api_deadline_stream_desc_t);
+        
+        /* Calculate stats for each stream */
+        for (int i = 0; i < deadline_ctx->nb_streams; i++) {
+            int scenario_idx = -1;
+            for (size_t j = 0; j < nb_scenario; j++) {
+                if (test_scenario_mixed_streams[j].stream_id == deadline_ctx->stream_state[i].stream_id) {
+                    scenario_idx = j;
+                    break;
+                }
+            }
+            
+            if (scenario_idx >= 0) {
+                if (test_scenario_mixed_streams[scenario_idx].stream_type == st_stream_type_normal) {
+                    deadline_api_calculate_normal_stats(deadline_ctx, i);
+                } else {
+                    deadline_api_calculate_deadline_stats(deadline_ctx, i, test_scenario_mixed_streams, nb_scenario);
+                }
+            }
+        }
+        
+        /* Print statistics report */
+        deadline_api_print_stats(deadline_ctx, test_scenario_mixed_streams, nb_scenario);
+    }
+    
     /* Verify all data was received correctly */
     if (ret == 0) {
         ret = deadline_api_verify(test_ctx, deadline_ctx, test_scenario_mixed_streams,
@@ -846,6 +1266,33 @@ int deadline_api_test_multiple_deadlines()
                                     test_scenario_multiple_deadlines,
                                     sizeof(test_scenario_multiple_deadlines) / sizeof(st_test_api_deadline_stream_desc_t),
                                     &simulated_time);
+    }
+    
+    /* Calculate and print statistics */
+    if (ret == 0) {
+        size_t nb_scenario = sizeof(test_scenario_multiple_deadlines) / sizeof(st_test_api_deadline_stream_desc_t);
+        
+        /* Calculate stats for each stream */
+        for (int i = 0; i < deadline_ctx->nb_streams; i++) {
+            int scenario_idx = -1;
+            for (size_t j = 0; j < nb_scenario; j++) {
+                if (test_scenario_multiple_deadlines[j].stream_id == deadline_ctx->stream_state[i].stream_id) {
+                    scenario_idx = j;
+                    break;
+                }
+            }
+            
+            if (scenario_idx >= 0) {
+                if (test_scenario_multiple_deadlines[scenario_idx].stream_type == st_stream_type_normal) {
+                    deadline_api_calculate_normal_stats(deadline_ctx, i);
+                } else {
+                    deadline_api_calculate_deadline_stats(deadline_ctx, i, test_scenario_multiple_deadlines, nb_scenario);
+                }
+            }
+        }
+        
+        /* Print statistics report */
+        deadline_api_print_stats(deadline_ctx, test_scenario_multiple_deadlines, nb_scenario);
     }
     
     /* Verify all data was received correctly */

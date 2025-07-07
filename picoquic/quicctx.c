@@ -3519,6 +3519,9 @@ picoquic_stream_head_t* picoquic_create_stream(picoquic_cnx_t* cnx, uint64_t str
         }
     }
 
+    // Set deadline to 0 
+    stream->deadline_ms = 0;
+
     return stream;
 }
 

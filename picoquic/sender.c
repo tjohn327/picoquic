@@ -46,6 +46,48 @@
  * generate new packets, which are queued in the chained list.
  */
 
+
+int picoquic_is_stream_deadline_aware(picoquic_stream_head_t* stream) {
+    return stream->deadline_ms > 0;
+}
+
+/* Deadline-aware streams get dynamic priority based on urgency */
+#define DEADLINE_PRIORITY_BASE 0x10  /* Reserve 0x00-0x0F for deadline streams */
+#define NORMAL_PRIORITY_DEFAULT 0x80  /* Default for non-deadline streams */
+
+/* Calculate priority based on first chunk's deadline urgency */
+static uint8_t calculate_deadline_priority(picoquic_stream_head_t* stream, picoquic_cnx_t* cnx) {
+    if (!picoquic_is_stream_deadline_aware(stream)) {
+        return stream->stream_priority; /* Use original priority */
+    }
+    
+    uint64_t current_time = picoquic_get_quic_time(cnx->quic);
+    
+    /* Check first chunk in queue */
+    picoquic_stream_queue_node_t* first_chunk = stream->send_queue;
+    if (first_chunk == NULL || first_chunk->offset >= first_chunk->length) {
+        return 0x0F; /* No pending data */
+    }
+    
+    /* Calculate deadline for first chunk */
+    uint64_t deadline_abs = first_chunk->enqueue_time + stream->deadline_ms * 1000;
+    uint64_t time_left = (deadline_abs > current_time) ? (deadline_abs - current_time) : 0;
+    
+    /* Map time_left to priority 0x00-0x0F (0 = most urgent) */
+    if (time_left == 0) return 0x00;
+    if (time_left < 10000) return 0x01;  /* < 10ms */
+    if (time_left < 20000) return 0x02;  /* < 20ms */
+    if (time_left < 30000) return 0x03;  /* < 30ms */
+    if (time_left < 50000) return 0x04;  /* < 50ms */
+    if (time_left < 100000) return 0x05; /* < 100ms */
+    if (time_left < 150000) return 0x06; /* < 150ms */
+    if (time_left < 200000) return 0x07; /* < 200ms */
+    if (time_left < 300000) return 0x08; /* < 300ms */
+    if (time_left < 500000) return 0x09; /* < 500ms */
+    if (time_left < 1000000) return 0x0A; /* < 1s */
+    return 0x0F;  /* > 1s */
+}
+
 static picoquic_stream_head_t* picoquic_find_stream_for_writing(picoquic_cnx_t* cnx,
     uint64_t stream_id, int * ret)
 {
@@ -250,6 +292,11 @@ int picoquic_add_to_stream_with_ctx(picoquic_cnx_t* cnx, uint64_t stream_id,
                 stream_data->length = length;
                 stream_data->offset = 0;
                 stream_data->next_stream_data = NULL;
+                stream_data->quic = cnx->quic;
+                // If deadline is set, track when chunk was added
+                if (stream->deadline_ms > 0) {
+                    stream_data->enqueue_time = picoquic_get_quic_time(cnx->quic); /* Track when chunk was added */
+                }
 
                 while (next != NULL) {
                     pprevious = &next->next_stream_data;
@@ -361,6 +408,42 @@ uint64_t picoquic_get_next_local_stream_id(picoquic_cnx_t* cnx, int is_unidir)
     }
 
     return cnx->next_stream_id[stream_type_id];     
+}
+
+uint64_t picoquic_create_deadline_stream(picoquic_cnx_t* cnx,
+                                        uint64_t deadline_ms,
+                                        uint64_t threshold_bytes,
+                                        uint8_t threshold_percent) {
+    /* Check if deadline streams are enabled */
+    if (!picoquic_is_deadline_aware_negotiated(cnx)) {
+        return UINT64_MAX;
+    }
+    
+    /* Get stream ID - always unidirectional for deadline streams */
+    uint64_t stream_id = picoquic_get_next_local_stream_id(cnx, 1);
+    if (stream_id == UINT64_MAX) {
+        return UINT64_MAX;
+    }
+    
+    /* Create stream */
+    picoquic_stream_head_t* stream = picoquic_create_stream(cnx, stream_id);
+    if (!stream) {
+        return UINT64_MAX;
+    }
+    
+    /* Set deadline parameters */
+    stream->deadline_ms = deadline_ms;
+    stream->expiry_threshold_abs = threshold_bytes;
+    stream->expiry_threshold_pct = threshold_percent;
+    stream->expired_bytes = 0;
+    
+    /* Initial priority - will be updated when first chunk is added */
+    stream->stream_priority = DEADLINE_PRIORITY_BASE + 0x0F;
+    
+    /* Insert into output list */
+    picoquic_insert_output_stream(cnx, stream);
+    
+    return stream_id;
 }
 
 int picoquic_stop_sending(picoquic_cnx_t* cnx,

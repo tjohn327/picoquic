@@ -110,6 +110,7 @@ extern "C" {
 #define PICOQUIC_ERROR_PATH_ADDRESS_FAMILY (PICOQUIC_ERROR_CLASS + 66)
 #define PICOQUIC_ERROR_PATH_NOT_READY (PICOQUIC_ERROR_CLASS + 67)
 #define PICOQUIC_ERROR_PATH_LIMIT_EXCEEDED (PICOQUIC_ERROR_CLASS + 68)
+#define PICOQUIC_ERROR_DEADLINE_EXCEEDED 0x4000 /* Deadline-aware stream exceeded expiry threshold */
 
 /*
  * Protocol errors defined in the QUIC spec
@@ -1383,6 +1384,17 @@ int picoquic_open_flow_control(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t
 
 /* Obtain the next available stream ID in the local category */
 uint64_t picoquic_get_next_local_stream_id(picoquic_cnx_t* cnx, int is_unidir);
+
+/* Create a deadline-aware stream with specified deadline and expiry thresholds.
+ * Returns stream_id on success, UINT64_MAX on failure.
+ * - deadline_ms: relative deadline in milliseconds for each data chunk
+ * - threshold_bytes: absolute byte threshold for expired data before aborting
+ * - threshold_percent: percentage threshold (0-100) for expired data before aborting
+ */
+uint64_t picoquic_create_deadline_stream(picoquic_cnx_t* cnx,
+                                        uint64_t deadline_ms,
+                                        uint64_t threshold_bytes,
+                                        uint8_t threshold_percent);
 
 /* Ask the peer to stop sending on a stream. The peer is expected
  * to reset that stream when receiving the "stop sending" signal. */

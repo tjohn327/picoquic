@@ -167,6 +167,8 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/cplusplus.cpp
     picoquictest/cpu_limited.c
     picoquictest/datagram_tests.c
+    picoquictest/deadline_api_test.c
+    picoquictest/deadline_stream_test.c
     picoquictest/delay_tolerant_test.c
     picoquictest/ech_test.c
     picoquictest/edge_cases.c

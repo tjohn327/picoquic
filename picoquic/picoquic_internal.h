@@ -376,6 +376,7 @@ typedef struct st_picoquic_stream_queue_node_t {
     uint64_t offset;  /* Stream offset of the first octet in "bytes" */
     size_t length;    /* Number of octets in "bytes" */
     uint8_t* bytes;
+    uint64_t enqueue_time;  /* When this chunk was added (microseconds) - for deadline tracking */
 } picoquic_stream_queue_node_t;
 
 /*
@@ -849,6 +850,11 @@ typedef struct st_picoquic_stream_head_t {
     unsigned int is_output_stream : 1; /* If stream is listed in the output list */
     unsigned int is_closed : 1; /* Stream is closed, closure is accouted for */
     unsigned int is_discarded : 1; /* There should be no more callback for that stream, the application has discarded it */
+    /* Deadline-aware stream fields */
+    uint64_t deadline_ms;           /* Relative deadline in ms (0 = no deadline) */
+    uint64_t expired_bytes;         /* Total bytes that missed deadline */
+    uint64_t expiry_threshold_abs;  /* Absolute byte threshold */
+    uint8_t  expiry_threshold_pct;  /* Percentage threshold (0-100) */
 } picoquic_stream_head_t;
 
 #define IS_CLIENT_STREAM_ID(id) (unsigned int)(((id) & 1) == 0)
@@ -1335,6 +1341,7 @@ typedef struct st_picoquic_cnx_t {
     unsigned int is_address_discovery_receiver : 1; /* receive the address discovery extension */
     unsigned int is_subscribed_to_path_allowed : 1; /* application wants to be advised if it is now possible to create a path */
     unsigned int is_notified_that_path_is_allowed : 1; /* application wants to be advised if it is now possible to create a path */
+    unsigned int enable_deadline_aware_streams : 1; /* DMTP: deadline-aware streams negotiated */
     
     /* PMTUD policy */
     picoquic_pmtud_policy_enum pmtud_policy;
@@ -1909,6 +1916,7 @@ picoquic_stream_head_t* picoquic_create_stream(picoquic_cnx_t* cnx, uint64_t str
 picoquic_stream_head_t* picoquic_create_missing_streams(picoquic_cnx_t* cnx, uint64_t stream_id, int is_remote);
 int picoquic_is_stream_closed(picoquic_stream_head_t* stream, int client_mode);
 int picoquic_delete_stream_if_closed(picoquic_cnx_t* cnx, picoquic_stream_head_t* stream);
+int picoquic_is_stream_deadline_aware(picoquic_stream_head_t* stream);
 
 void picoquic_update_stream_initial_remote(picoquic_cnx_t* cnx);
 

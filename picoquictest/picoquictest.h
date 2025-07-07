@@ -587,6 +587,10 @@ int quicperf_datagram_test();
 int quicperf_media_test();
 int quicperf_multi_test();
 int quicperf_overflow_test();
+int deadline_stream_test();
+int deadline_api_test_single_stream();
+int deadline_api_test_mixed_streams();
+int deadline_api_test_multiple_deadlines();
 int cplusplustest();
 
 #ifdef __cplusplus

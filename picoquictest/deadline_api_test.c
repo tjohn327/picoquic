@@ -50,9 +50,23 @@ typedef struct st_deadline_api_test_ctx_t {
         uint8_t* recv_buffer;
     } stream_state[32];  /* Max 32 streams for testing */
     
+    /* Server-side tracking */
+    struct {
+        uint64_t stream_id;
+        size_t bytes_received;
+        size_t expected_bytes;
+        uint8_t* recv_buffer;
+        int fin_received;
+    } server_stream_state[32];
+    int nb_server_streams;
+    
     int nb_streams;
     uint64_t start_time;
     int test_completed;
+    
+    /* Test scenario info */
+    st_test_api_deadline_stream_desc_t* scenario;
+    size_t nb_scenario;
     
     /* Callback contexts */
     test_api_callback_t client_callback;
@@ -104,6 +118,12 @@ static void deadline_api_delete_test_ctx(deadline_api_test_ctx_t* test_ctx)
             }
             if (test_ctx->stream_state[i].recv_buffer != NULL) {
                 free(test_ctx->stream_state[i].recv_buffer);
+            }
+        }
+        /* Free server-side buffers */
+        for (int i = 0; i < test_ctx->nb_server_streams; i++) {
+            if (test_ctx->server_stream_state[i].recv_buffer != NULL) {
+                free(test_ctx->server_stream_state[i].recv_buffer);
             }
         }
         free(test_ctx);
@@ -162,15 +182,79 @@ static int deadline_api_callback(picoquic_cnx_t* cnx,
     case picoquic_callback_stream_data:
     case picoquic_callback_stream_fin:
     {
-        /* For server side, we don't track individual streams in detail */
+        /* Server side data tracking */
         if (!cb_ctx->client_mode) {
-            /* Just count the bytes received on server */
-            if (length > 0) {
-                DBG_PRINTF("Server received %zu bytes on stream %lu\n",
-                    length, (unsigned long)stream_id);
+            /* Find or create server stream tracking */
+            int server_stream_idx = -1;
+            for (int i = 0; i < deadline_ctx->nb_server_streams; i++) {
+                if (deadline_ctx->server_stream_state[i].stream_id == stream_id) {
+                    server_stream_idx = i;
+                    break;
+                }
             }
+            
+            if (server_stream_idx < 0 && deadline_ctx->nb_server_streams < 32) {
+                /* Create new server stream tracking */
+                server_stream_idx = deadline_ctx->nb_server_streams++;
+                deadline_ctx->server_stream_state[server_stream_idx].stream_id = stream_id;
+                deadline_ctx->server_stream_state[server_stream_idx].bytes_received = 0;
+                deadline_ctx->server_stream_state[server_stream_idx].expected_bytes = 0;
+                deadline_ctx->server_stream_state[server_stream_idx].recv_buffer = NULL;
+                deadline_ctx->server_stream_state[server_stream_idx].fin_received = 0;
+                
+                /* Calculate expected bytes from scenario */
+                size_t expected = 0;
+                if (deadline_ctx->scenario != NULL) {
+                    for (size_t i = 0; i < deadline_ctx->nb_scenario; i++) {
+                        if (deadline_ctx->scenario[i].stream_id == stream_id) {
+                            if (deadline_ctx->scenario[i].stream_type == st_stream_type_deadline) {
+                                expected = deadline_ctx->scenario[i].chunk_size * 
+                                          deadline_ctx->scenario[i].num_chunks;
+                            } else {
+                                expected = deadline_ctx->scenario[i].len;
+                            }
+                            break;
+                        }
+                    }
+                }
+                deadline_ctx->server_stream_state[server_stream_idx].expected_bytes = expected;
+                /* Allocate receive buffer */
+                if (expected > 0) {
+                    deadline_ctx->server_stream_state[server_stream_idx].recv_buffer = 
+                        (uint8_t*)malloc(expected);
+                    if (deadline_ctx->server_stream_state[server_stream_idx].recv_buffer == NULL) {
+                        cb_ctx->error_detected |= test_api_fail_data_on_unknown_stream;
+                        return -1;
+                    }
+                }
+            }
+            
+            if (server_stream_idx < 0) {
+                DBG_PRINTF("Server: No tracking slot available for stream %lu\n", 
+                    (unsigned long)stream_id);
+                cb_ctx->error_detected |= test_api_fail_data_on_unknown_stream;
+                ret = -1;
+            } else if (length > 0) {
+                /* Store received data */
+                size_t offset = deadline_ctx->server_stream_state[server_stream_idx].bytes_received;
+                if (deadline_ctx->server_stream_state[server_stream_idx].recv_buffer != NULL &&
+                    offset + length <= deadline_ctx->server_stream_state[server_stream_idx].expected_bytes) {
+                    memcpy(deadline_ctx->server_stream_state[server_stream_idx].recv_buffer + offset,
+                           bytes, length);
+                }
+                deadline_ctx->server_stream_state[server_stream_idx].bytes_received += length;
+                
+                DBG_PRINTF("Server received %zu bytes on stream %lu, total %zu/%zu\n",
+                    length, (unsigned long)stream_id,
+                    deadline_ctx->server_stream_state[server_stream_idx].bytes_received,
+                    deadline_ctx->server_stream_state[server_stream_idx].expected_bytes);
+            }
+            
             if (fin_or_event == picoquic_callback_stream_fin) {
-                DBG_PRINTF("Server: Stream %lu finished\n", (unsigned long)stream_id);
+                deadline_ctx->server_stream_state[server_stream_idx].fin_received = 1;
+                DBG_PRINTF("Server: Stream %lu finished with %zu bytes\n", 
+                    (unsigned long)stream_id,
+                    deadline_ctx->server_stream_state[server_stream_idx].bytes_received);
             }
             break;
         }
@@ -339,6 +423,9 @@ static int deadline_api_data_sending_loop(picoquic_test_tls_api_ctx_t* test_ctx,
                                          size_t nb_scenario,
                                          uint64_t* simulated_time)
 {
+    /* Store scenario info for server callback */
+    deadline_ctx->scenario = scenario;
+    deadline_ctx->nb_scenario = nb_scenario;
     int ret = 0;
     int nb_trials = 0;
     int nb_inactive = 0;
@@ -506,7 +593,7 @@ static int deadline_api_verify(picoquic_test_tls_api_ctx_t* test_ctx,
         ret = -1;
     }
     
-    /* Verify all data was sent and received */
+    /* Verify all data was sent by client */
     for (size_t i = 0; ret == 0 && i < deadline_ctx->nb_streams; i++) {
         size_t scenario_idx = i;
         if (scenario_idx >= nb_scenario) continue;
@@ -524,9 +611,66 @@ static int deadline_api_verify(picoquic_test_tls_api_ctx_t* test_ctx,
                 deadline_ctx->stream_state[i].bytes_sent, expected_bytes);
             ret = -1;
         }
+    }
+    
+    /* Verify all data was received by server */
+    for (size_t i = 0; ret == 0 && i < deadline_ctx->nb_server_streams; i++) {
+        if (!deadline_ctx->server_stream_state[i].fin_received) {
+            DBG_PRINTF("Server: Stream %lu did not receive FIN\n",
+                (unsigned long)deadline_ctx->server_stream_state[i].stream_id);
+            ret = -1;
+        }
         
-        /* For unidirectional streams, we don't verify received bytes on client side */
-        /* The server side will have received the data */
+        if (deadline_ctx->server_stream_state[i].bytes_received != 
+            deadline_ctx->server_stream_state[i].expected_bytes) {
+            DBG_PRINTF("Server: Stream %lu received %zu bytes, expected %zu\n",
+                (unsigned long)deadline_ctx->server_stream_state[i].stream_id,
+                deadline_ctx->server_stream_state[i].bytes_received,
+                deadline_ctx->server_stream_state[i].expected_bytes);
+            ret = -1;
+        }
+        
+        /* Verify data content matches */
+        if (ret == 0 && deadline_ctx->server_stream_state[i].recv_buffer != NULL) {
+            /* Find corresponding client stream to get source data */
+            int client_stream_idx = -1;
+            for (int j = 0; j < deadline_ctx->nb_streams; j++) {
+                if (deadline_ctx->stream_state[j].stream_id == 
+                    deadline_ctx->server_stream_state[i].stream_id) {
+                    client_stream_idx = j;
+                    break;
+                }
+            }
+            
+            if (client_stream_idx >= 0 && deadline_ctx->stream_state[client_stream_idx].send_buffer != NULL) {
+                if (memcmp(deadline_ctx->server_stream_state[i].recv_buffer,
+                          deadline_ctx->stream_state[client_stream_idx].send_buffer,
+                          deadline_ctx->server_stream_state[i].bytes_received) != 0) {
+                    DBG_PRINTF("Server: Data mismatch on stream %lu\n",
+                        (unsigned long)deadline_ctx->server_stream_state[i].stream_id);
+                    ret = -1;
+                }
+            }
+        }
+    }
+    
+    /* Verify we received data for all expected streams */
+    if (ret == 0) {
+        for (size_t i = 0; i < deadline_ctx->nb_streams; i++) {
+            uint64_t stream_id = deadline_ctx->stream_state[i].stream_id;
+            int found = 0;
+            for (size_t j = 0; j < deadline_ctx->nb_server_streams; j++) {
+                if (deadline_ctx->server_stream_state[j].stream_id == stream_id) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                DBG_PRINTF("Server: No data received for stream %lu\n", 
+                    (unsigned long)stream_id);
+                ret = -1;
+            }
+        }
     }
     
     /* Check memory leaks */

@@ -26,6 +26,7 @@
 #include "picoquic_internal.h"
 #include "picoquic_unified_log.h"
 #include "tls_api.h"
+#include "picoquic_bbr.h"
 #include <string.h>
 
 uint64_t picoquic_transport_param_varint_decode(picoquic_cnx_t * cnx, uint8_t* bytes, uint64_t extension_length, int* ret) 
@@ -991,6 +992,13 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
     /* ACK Frequency is only enabled on server if negotiated by client */
     if (!cnx->client_mode && !cnx->is_ack_frequency_negotiated) {
         cnx->local_parameters.min_ack_delay = 0;
+    }
+
+    /* If deadline-aware streams are negotiated, enforce BBR congestion control */
+    if (picoquic_is_deadline_aware_negotiated(cnx)) {
+        picoquic_set_congestion_algorithm(cnx, picoquic_bbr_algorithm);
+        DBG_PRINTF("%s:%u:%s: DMTP negotiated, enforcing BBR congestion control\n", 
+                   __FILE__, __LINE__, __func__);
     }
 
     *consumed = byte_index;

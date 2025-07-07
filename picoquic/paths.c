@@ -375,6 +375,79 @@ int picoquic_verify_path_available(picoquic_cnx_t* cnx, picoquic_path_t** next_p
 }
 
 /*
+ * Select best path for deadline-aware stream
+ * Returns the path that can deliver data before the deadline, or NULL if no path can meet the deadline
+ */
+picoquic_path_t* picoquic_select_path_for_deadline(picoquic_cnx_t* cnx, uint64_t deadline_absolute, uint64_t current_time)
+{
+    picoquic_path_t* best_path = NULL;
+    uint64_t best_eta = UINT64_MAX;
+    
+    /* Only use deadline-aware selection if DMTP is negotiated */
+    if (!picoquic_is_deadline_aware_negotiated(cnx)) {
+        return NULL;
+    }
+    
+    for (int i = 0; i < cnx->nb_paths; i++) {
+        picoquic_path_t* path = cnx->path[i];
+        
+        /* Skip paths that are not usable */
+        if (!path->first_tuple->challenge_verified || path->path_is_demoted || 
+            path->path_is_backup || path->nb_retransmit > 0) {
+            continue;
+        }
+        
+        /* Calculate estimated time of arrival (ETA) for this path
+         * ETA = current_time + transmission_time + half_RTT
+         * transmission_time = bytes_in_transit / bandwidth (if bandwidth is known)
+         * We use smoothed_rtt/2 as an estimate of one-way delay
+         */
+        uint64_t eta = current_time;
+        
+        if (path->bandwidth_estimate > 0 && path->cwin > 0) {
+            /* Use bandwidth estimate if available */
+            uint64_t transmission_time = (path->bytes_in_transit * 1000000) / path->bandwidth_estimate;
+            eta += transmission_time;
+        } else if (path->cwin > 0) {
+            /* Fallback: estimate based on cwnd and RTT */
+            uint64_t transmission_time = (path->bytes_in_transit * path->smoothed_rtt) / path->cwin;
+            eta += transmission_time;
+        }
+        
+        /* Add one-way delay estimate */
+        eta += path->smoothed_rtt / 2;
+        
+        /* Check if this path can meet the deadline and is better than current best */
+        if (eta <= deadline_absolute && eta < best_eta) {
+            best_eta = eta;
+            best_path = path;
+            DBG_PRINTF("%s:%u:%s: Path %d selected for deadline, ETA=%" PRIu64 " deadline=%" PRIu64 "\n",
+                       __FILE__, __LINE__, __func__, i, eta, deadline_absolute);
+        }
+    }
+    
+    if (best_path == NULL && cnx->nb_paths > 0) {
+        /* No path can meet deadline, fallback to path with lowest latency */
+        uint64_t min_rtt = UINT64_MAX;
+        for (int i = 0; i < cnx->nb_paths; i++) {
+            picoquic_path_t* path = cnx->path[i];
+            if (!path->first_tuple->challenge_verified || path->path_is_demoted || 
+                path->path_is_backup) {
+                continue;
+            }
+            if (path->rtt_min < min_rtt) {
+                min_rtt = path->rtt_min;
+                best_path = path;
+            }
+        }
+        DBG_PRINTF("%s:%u:%s: No path meets deadline, using lowest RTT path\n",
+                   __FILE__, __LINE__, __func__);
+    }
+    
+    return best_path;
+}
+
+/*
  * Produce a sorting of available paths
  */
 
@@ -458,31 +531,66 @@ void picoquic_sort_available_paths(picoquic_cnx_t* cnx, uint64_t current_time, u
         cnx->path[i_min_rtt]->is_nominal_ack_path = 1;
     }
 
-    if (is_ack_needed && is_min_rtt_pacing_ok) {
-        *next_path = cnx->path[i_min_rtt];
+    /* Check if we have a deadline-aware stream to send */
+    if (next_stream != NULL && next_stream->deadline_ms > 0 && picoquic_is_deadline_aware_negotiated(cnx)) {
+        /* Calculate absolute deadline from relative deadline */
+        uint64_t deadline_absolute = next_stream->last_time_data_sent + (next_stream->deadline_ms * 1000);
+        picoquic_path_t* deadline_path = picoquic_select_path_for_deadline(cnx, deadline_absolute, current_time);
+        
+        if (deadline_path != NULL) {
+            /* Check if deadline path is ready (pacing and congestion) */
+            int deadline_path_index = -1;
+            for (int i = 0; i < cnx->nb_paths; i++) {
+                if (cnx->path[i] == deadline_path) {
+                    deadline_path_index = i;
+                    break;
+                }
+            }
+            
+            if (deadline_path_index >= 0 && 
+                (deadline_path_index == data_path_cwin || deadline_path_index == data_path_pacing)) {
+                /* Deadline path is ready, use it */
+                *next_path = deadline_path;
+                DBG_PRINTF("%s:%u:%s: Using deadline-aware path selection for stream %lu\n",
+                           __FILE__, __LINE__, __func__, next_stream->stream_id);
+            }
+            else {
+                /* Deadline path not ready, fall through to normal selection */
+                DBG_PRINTF("%s:%u:%s: Deadline path not ready for stream %lu\n",
+                           __FILE__, __LINE__, __func__, next_stream->stream_id);
+            }
+        }
     }
-    else if (data_path_cwin >= 0) {
-        /* if there is a path ready to send the most urgent data, select it */
-        if (affinity_path_id >= 0) {
-            *next_path = cnx->path[affinity_path_id];
+    
+    /* If no deadline path was selected, use normal path selection */
+    if (*next_path == NULL) {
+        if (is_ack_needed && is_min_rtt_pacing_ok) {
+            *next_path = cnx->path[i_min_rtt];
+        }
+        else if (data_path_cwin >= 0) {
+            /* if there is a path ready to send the most urgent data, select it */
+            if (affinity_path_id >= 0) {
+                *next_path = cnx->path[affinity_path_id];
+            }
+            else {
+                *next_path = cnx->path[data_path_cwin];
+            }
+        }
+        else if (data_path_pacing >= 0) {
+            *next_path = cnx->path[data_path_pacing];
         }
         else {
-            *next_path = cnx->path[data_path_cwin];
+            /* No path is ready at all. Set the next wake time to the min of current
+             * value and next pacing time.
+             */
+            if (pacing_time_next < *next_wake_time) {
+                *next_wake_time = pacing_time_next;
+                SET_LAST_WAKE(cnx->quic, PICOQUIC_SENDER);
+            }
+            *next_path = cnx->path[0];
         }
     }
-    else if (data_path_pacing >= 0) {
-        *next_path = cnx->path[data_path_pacing];
-    }
-    else {
-        /* No path is ready at all. Set the next wake time to the min of current
-         * value and next pacing time.
-         */
-        if (pacing_time_next < *next_wake_time) {
-            *next_wake_time = pacing_time_next;
-            SET_LAST_WAKE(cnx->quic, PICOQUIC_SENDER);
-        }
-        *next_path = cnx->path[0];
-    }
+    
     (*next_path)->selected++;
     *next_tuple = (*next_path)->first_tuple;
 }

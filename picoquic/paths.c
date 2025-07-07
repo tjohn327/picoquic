@@ -375,6 +375,36 @@ int picoquic_verify_path_available(picoquic_cnx_t* cnx, picoquic_path_t** next_p
 }
 
 /*
+ * Find the fastest available path (lowest RTT)
+ * Used for ACKs and retransmissions when DMTP is enabled
+ */
+static picoquic_path_t* picoquic_find_fastest_path(picoquic_cnx_t* cnx)
+{
+    picoquic_path_t* fastest_path = NULL;
+    uint64_t min_rtt = UINT64_MAX;
+    
+    for (int i = 0; i < cnx->nb_paths; i++) {
+        picoquic_path_t* path = cnx->path[i];
+        
+        /* Skip paths that are not usable */
+        if (!path->first_tuple->challenge_verified || path->path_is_demoted || 
+            path->path_is_backup) {
+            continue;
+        }
+        
+        /* Use smoothed_rtt as the metric, fallback to rtt_min if not available */
+        uint64_t path_rtt = (path->smoothed_rtt > 0) ? path->smoothed_rtt : path->rtt_min;
+        
+        if (path_rtt > 0 && path_rtt < min_rtt) {
+            min_rtt = path_rtt;
+            fastest_path = path;
+        }
+    }
+    
+    return fastest_path;
+}
+
+/*
  * Select best path for deadline-aware stream
  * Returns the path that can deliver data before the deadline, or NULL if no path can meet the deadline
  */
@@ -528,7 +558,26 @@ void picoquic_sort_available_paths(picoquic_cnx_t* cnx, uint64_t current_time, u
 
     if (i_min_rtt >= 0) {
         is_ack_needed = picoquic_is_ack_needed(cnx, current_time, next_wake_time, 0, 0);
-        cnx->path[i_min_rtt]->is_nominal_ack_path = 1;
+        
+        /* When DMTP is enabled, always use the fastest path for ACKs */
+        if (picoquic_is_deadline_aware_negotiated(cnx)) {
+            picoquic_path_t* fastest_path = picoquic_find_fastest_path(cnx);
+            if (fastest_path != NULL) {
+                /* Clear previous nominal ACK path and set the fastest one */
+                for (int i = 0; i < cnx->nb_paths; i++) {
+                    cnx->path[i]->is_nominal_ack_path = 0;
+                }
+                fastest_path->is_nominal_ack_path = 1;
+                DBG_PRINTF("%s:%u:%s: DMTP enabled, using fastest path for ACKs\n",
+                           __FILE__, __LINE__, __func__);
+            } else {
+                /* Fallback to min RTT path */
+                cnx->path[i_min_rtt]->is_nominal_ack_path = 1;
+            }
+        } else {
+            /* Normal behavior when DMTP is not enabled */
+            cnx->path[i_min_rtt]->is_nominal_ack_path = 1;
+        }
     }
 
     /* Check if we have a deadline-aware stream to send */
@@ -635,7 +684,21 @@ void picoquic_select_next_path_tuple(picoquic_cnx_t* cnx, uint64_t current_time,
         else if (cnx->nb_paths > 0 && cnx->path[path_index]->first_tuple->challenge_verified && cnx->path[path_index]->nb_retransmit > 0 &&
             cnx->cnx_state == picoquic_state_ready && cnx->path[path_index]->bytes_in_transit == 0) {
             cnx->path[path_index]->is_multipath_probe_needed = 1;
-            *next_path = cnx->path[path_index];
+            
+            /* When DMTP is enabled, use fastest path for retransmissions */
+            if (picoquic_is_deadline_aware_negotiated(cnx)) {
+                picoquic_path_t* fastest_path = picoquic_find_fastest_path(cnx);
+                if (fastest_path != NULL && fastest_path->bytes_in_transit == 0) {
+                    *next_path = fastest_path;
+                    DBG_PRINTF("%s:%u:%s: DMTP enabled, using fastest path for retransmission\n",
+                               __FILE__, __LINE__, __func__);
+                } else {
+                    *next_path = cnx->path[path_index];
+                }
+            } else {
+                *next_path = cnx->path[path_index];
+            }
+            
             *next_tuple = (*next_path)->first_tuple;
             (*next_path)->challenger++;
             break;

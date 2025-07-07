@@ -1917,6 +1917,10 @@ picoquic_stream_head_t* picoquic_create_missing_streams(picoquic_cnx_t* cnx, uin
 int picoquic_is_stream_closed(picoquic_stream_head_t* stream, int client_mode);
 int picoquic_delete_stream_if_closed(picoquic_cnx_t* cnx, picoquic_stream_head_t* stream);
 int picoquic_is_stream_deadline_aware(picoquic_stream_head_t* stream);
+uint8_t calculate_deadline_priority(picoquic_stream_head_t* stream, picoquic_cnx_t* cnx);
+void picoquic_track_expired_bytes(picoquic_stream_head_t* stream, size_t bytes_sent, uint64_t current_time);
+int picoquic_should_abort_deadline_stream(picoquic_stream_head_t* stream);
+int picoquic_should_retransmit_for_deadline(picoquic_cnx_t* cnx, uint64_t stream_id, uint64_t offset, size_t length);
 
 void picoquic_update_stream_initial_remote(picoquic_cnx_t* cnx);
 

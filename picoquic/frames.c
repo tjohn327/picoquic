@@ -1347,6 +1347,38 @@ picoquic_stream_head_t* picoquic_find_ready_stream_path(picoquic_cnx_t* cnx, pic
     picoquic_stream_head_t* stream = first_stream;
     picoquic_stream_head_t* found_stream = NULL;
 
+    /* Phase 1: Update priorities for ALL deadline streams and check abort thresholds */
+    if (cnx->enable_deadline_aware_streams) {
+        picoquic_stream_head_t* temp_stream = cnx->first_output_stream;
+        while (temp_stream != NULL) {
+            picoquic_stream_head_t* next = temp_stream->next_output_stream;
+            
+            if (picoquic_is_stream_deadline_aware(temp_stream)) {
+                /* Check if stream should be aborted based on expired_bytes */
+                if (picoquic_should_abort_deadline_stream(temp_stream)) {
+                    picoquic_reset_stream(cnx, temp_stream->stream_id, 
+                                       PICOQUIC_ERROR_DEADLINE_EXCEEDED);
+                    temp_stream = next;
+                    continue;
+                }
+                
+                /* Update priority based on current deadline urgency */
+                if (temp_stream->send_queue != NULL) {
+                    uint8_t new_priority = calculate_deadline_priority(temp_stream, cnx);
+                    if (new_priority != temp_stream->stream_priority) {
+                        temp_stream->stream_priority = new_priority;
+                        /* Remove and reinsert to maintain order */
+                        picoquic_remove_output_stream(cnx, temp_stream);
+                        picoquic_insert_output_stream(cnx, temp_stream);
+                    }
+                }
+            }
+            temp_stream = next;
+        }
+        
+        /* Reset stream pointer after potential reordering */
+        stream = cnx->first_output_stream;
+    }
 
     /* Look for a ready stream */
     while (stream != NULL) {
@@ -1717,6 +1749,9 @@ uint8_t * picoquic_format_stream_frame(picoquic_cnx_t* cnx, picoquic_stream_head
                     stream->sent_offset += stream_data_context.length;
                     stream->last_time_data_sent = picoquic_get_quic_time(cnx->quic);
                     cnx->data_sent += stream_data_context.length;
+                    
+                    /* Track expired bytes for deadline streams */
+                    picoquic_track_expired_bytes(stream, stream_data_context.length, picoquic_get_quic_time(cnx->quic));
 
                     if (stream_data_context.length > 0) {
                         if (stream_data_context.app_buffer == NULL ||
@@ -1785,6 +1820,9 @@ uint8_t * picoquic_format_stream_frame(picoquic_cnx_t* cnx, picoquic_stream_head
                     stream->sent_offset += length;
                     stream->last_time_data_sent = picoquic_get_quic_time(cnx->quic);
                     cnx->data_sent += length;
+                    
+                    /* Track expired bytes for deadline streams */
+                    picoquic_track_expired_bytes(stream, length, picoquic_get_quic_time(cnx->quic));
                 }
 
                 bytes = bytes0 + byte_index;
@@ -2072,6 +2110,12 @@ uint8_t* picoquic_copy_stream_frame_for_retransmit(
                 /* That frame is not needed anymore */
                 is_needed = 0;
             }
+            // else if (stream != NULL && is_needed) {
+            //     /* Check if retransmission should proceed for deadline streams */
+            //     if (!picoquic_should_retransmit_for_deadline(cnx, stream_id, offset, data_available)) {
+            //         is_needed = 0;
+            //     }
+            // }
         }
         if (is_needed) {
             /* Need to check how much can be encoded in the packet:

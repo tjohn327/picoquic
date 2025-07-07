@@ -56,7 +56,7 @@ int picoquic_is_stream_deadline_aware(picoquic_stream_head_t* stream) {
 #define NORMAL_PRIORITY_DEFAULT 0x80  /* Default for non-deadline streams */
 
 /* Calculate priority based on first chunk's deadline urgency */
-static uint8_t calculate_deadline_priority(picoquic_stream_head_t* stream, picoquic_cnx_t* cnx) {
+uint8_t calculate_deadline_priority(picoquic_stream_head_t* stream, picoquic_cnx_t* cnx) {
     if (!picoquic_is_stream_deadline_aware(stream)) {
         return stream->stream_priority; /* Use original priority */
     }
@@ -86,6 +86,133 @@ static uint8_t calculate_deadline_priority(picoquic_stream_head_t* stream, picoq
     if (time_left < 500000) return 0x09; /* < 500ms */
     if (time_left < 1000000) return 0x0A; /* < 1s */
     return 0x0F;  /* > 1s */
+}
+
+/* Track expired bytes when sending data past its deadline */
+void picoquic_track_expired_bytes(picoquic_stream_head_t* stream, 
+                                 size_t bytes_sent,
+                                 uint64_t current_time) {
+    if (!picoquic_is_stream_deadline_aware(stream)) {
+        return;
+    }
+    
+    /* Find which chunks are being sent */
+    uint64_t offset = stream->sent_offset;
+    picoquic_stream_queue_node_t* chunk = stream->send_queue;
+    
+    while (chunk != NULL && bytes_sent > 0) {
+        if (offset < chunk->offset + chunk->length) {
+            /* This chunk is being sent */
+            uint64_t deadline_abs = chunk->enqueue_time + (stream->deadline_ms * 1000);
+            
+            if (current_time > deadline_abs) {
+                /* Sending expired data */
+                size_t chunk_bytes = chunk->offset + chunk->length - offset;
+                if (chunk_bytes > bytes_sent) {
+                    chunk_bytes = bytes_sent;
+                }
+                stream->expired_bytes += chunk_bytes;
+                
+                DBG_PRINTF("%s:%u:%s: Stream %lu sending %lu expired bytes\n",
+                          __FILE__, __LINE__, __func__, 
+                          stream->stream_id, chunk_bytes);
+                
+                bytes_sent -= chunk_bytes;
+                offset += chunk_bytes;
+            } else {
+                /* Not expired, advance normally */
+                size_t chunk_bytes = chunk->offset + chunk->length - offset;
+                if (chunk_bytes > bytes_sent) {
+                    chunk_bytes = bytes_sent;
+                }
+                bytes_sent -= chunk_bytes;
+                offset += chunk_bytes;
+            }
+        }
+        
+        if (offset >= chunk->offset + chunk->length) {
+            chunk = chunk->next_stream_data;
+        }
+    }
+}
+
+/* Check if stream should be aborted based on expired byte thresholds */
+int picoquic_should_abort_deadline_stream(picoquic_stream_head_t* stream) {
+    if (!picoquic_is_stream_deadline_aware(stream)) {
+        return 0;
+    }
+    
+    /* Check absolute threshold */
+    if (stream->expiry_threshold_abs > 0 && 
+        stream->expired_bytes > stream->expiry_threshold_abs) {
+        DBG_PRINTF("%s:%u:%s: Stream %lu exceeded absolute threshold: %lu > %lu\n",
+                  __FILE__, __LINE__, __func__, stream->stream_id,
+                  stream->expired_bytes, stream->expiry_threshold_abs);
+        return 1;
+    }
+    
+    /* Check percentage threshold */
+    if (stream->expiry_threshold_pct > 0) {
+        uint64_t total_bytes = stream->sent_offset + stream->expired_bytes;
+        if (total_bytes > 0) {
+            uint8_t expired_pct = (uint8_t)((stream->expired_bytes * 100) / total_bytes);
+            if (expired_pct > stream->expiry_threshold_pct) {
+                DBG_PRINTF("%s:%u:%s: Stream %lu exceeded percentage threshold: %u%% > %u%%\n",
+                          __FILE__, __LINE__, __func__, stream->stream_id,
+                          expired_pct, stream->expiry_threshold_pct);
+                return 1;
+            }
+        }
+    }
+    
+    return 0;
+}
+
+/* Check if retransmission should proceed for deadline-aware streams */
+int picoquic_should_retransmit_for_deadline(picoquic_cnx_t* cnx, 
+                                           uint64_t stream_id, 
+                                           uint64_t offset, 
+                                           size_t length) {
+    picoquic_stream_head_t* stream = picoquic_find_stream(cnx, stream_id);
+    
+    if (!stream || !picoquic_is_stream_deadline_aware(stream)) {
+        return 1;  /* Not deadline-aware, normal retransmission */
+    }
+    
+    uint64_t current_time = picoquic_get_quic_time(cnx->quic);
+    
+    /* Find the chunk containing this offset */
+    picoquic_stream_queue_node_t* chunk = stream->send_queue;
+    while (chunk != NULL) {
+        if (offset >= chunk->offset && offset < chunk->offset + chunk->length) {
+            /* Found the chunk - check its deadline */
+            uint64_t deadline_abs = chunk->enqueue_time + (stream->deadline_ms * 1000);
+            
+            /* Estimate if retransmitted data can arrive in time */
+            uint64_t min_path_rtt = cnx->path[0]->rtt_min;
+            for (int i = 1; i < cnx->nb_paths; i++) {
+                if (!cnx->path[i]->path_is_demoted && 
+                    cnx->path[i]->rtt_min > 0 && 
+                    cnx->path[i]->rtt_min < min_path_rtt) {
+                    min_path_rtt = cnx->path[i]->rtt_min;
+                }
+            }
+            
+            if (current_time + min_path_rtt > deadline_abs) {
+                /* Cannot meet deadline - skip retransmission */
+                stream->expired_bytes += length;
+                
+                DBG_PRINTF("%s:%u:%s: Skip retransmit for stream %lu, offset %lu - deadline passed\n",
+                          __FILE__, __LINE__, __func__, stream_id, offset);
+                
+                return 0;
+            }
+            break;
+        }
+        chunk = chunk->next_stream_data;
+    }
+    
+    return 1;  /* Proceed with retransmission */
 }
 
 static picoquic_stream_head_t* picoquic_find_stream_for_writing(picoquic_cnx_t* cnx,

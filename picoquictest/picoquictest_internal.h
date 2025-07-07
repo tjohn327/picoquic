@@ -383,6 +383,156 @@ int picoquic_test_set_minimal_cnx_with_time(picoquic_quic_t** quic, picoquic_cnx
 int picoquic_test_reset_minimal_cnx(picoquic_quic_t* quic, picoquic_cnx_t** cnx);
 void picoquic_test_delete_minimal_cnx(picoquic_quic_t** quic, picoquic_cnx_t** cnx);
 
+/* Deadline API test structures and functions */
+
+/* Stream descriptor for deadline-aware testing */
+typedef enum {
+    st_stream_type_normal = 0,
+    st_stream_type_deadline = 1
+} st_stream_type_t;
+
+typedef struct st_test_api_deadline_stream_desc_t {
+    uint64_t stream_id;
+    st_stream_type_t stream_type;
+    
+    /* For normal streams */
+    size_t len;  /* Total length to send */
+    
+    /* For deadline streams */
+    size_t chunk_size;      /* Size of each chunk */
+    uint64_t interval_ms;   /* Interval between chunks in ms */
+    uint64_t deadline_ms;   /* Relative deadline for each chunk in ms */
+    int num_chunks;         /* Number of chunks to send */
+    
+    /* Common fields */
+    uint64_t previous_stream_id;  /* For chaining stream creation */
+} st_test_api_deadline_stream_desc_t;
+
+/* Statistics for normal streams */
+typedef struct st_normal_stream_stats_t {
+    uint64_t time_to_first_byte;    /* Time from stream creation to first byte received */
+    uint64_t time_to_completion;    /* Time from stream creation to all data received */
+    double throughput_mbps;         /* Average throughput in Mbps */
+    size_t bytes_transferred;       /* Total bytes transferred */
+} normal_stream_stats_t;
+
+/* Statistics for deadline streams */
+typedef struct st_deadline_stream_stats_t {
+    /* Per-chunk statistics */
+    struct {
+        uint64_t send_time;         /* When chunk was sent */
+        uint64_t receive_time;      /* When chunk was received */
+        uint64_t deadline_time;     /* Absolute deadline for this chunk */
+        int deadline_met;           /* 1 if received before deadline, 0 otherwise */
+        uint64_t latency;           /* End-to-end latency for this chunk */
+    } *chunk_stats;
+    int num_chunks;
+    
+    /* Aggregate statistics */
+    double deadline_compliance_percent;  /* Percentage of chunks meeting deadline */
+    double avg_throughput_mbps;         /* Average throughput */
+    double avg_latency_ms;              /* Average chunk latency */
+    double latency_jitter_ms;           /* Standard deviation of latency */
+    uint64_t time_to_first_byte;        /* Time to receive first byte */
+    uint64_t time_to_completion;        /* Time to receive all data */
+} deadline_stream_stats_t;
+
+/* Test context extension for deadline streams */
+typedef struct st_deadline_api_test_ctx_t {
+    /* Track per-stream state */
+    struct {
+        uint64_t stream_id;
+        int chunks_sent;
+        uint64_t next_send_time;
+        size_t bytes_sent;
+        size_t bytes_received;
+        uint8_t* send_buffer;
+        uint8_t* recv_buffer;
+        /* Timing info */
+        uint64_t stream_created_time;
+        uint64_t first_send_time;
+        uint64_t last_send_time;
+        /* Chunk send times for deadline streams */
+        uint64_t* chunk_send_times;
+    } stream_state[32];  /* Max 32 streams for testing */
+    
+    /* Server-side tracking */
+    struct {
+        uint64_t stream_id;
+        size_t bytes_received;
+        size_t expected_bytes;
+        uint8_t* recv_buffer;
+        int fin_received;
+        /* Timing info */
+        uint64_t first_byte_time;
+        uint64_t last_byte_time;
+        /* Chunk tracking for deadline streams */
+        int chunks_received;
+        uint64_t* chunk_receive_times;
+        size_t* chunk_sizes;
+        /* Stream type info */
+        st_stream_type_t stream_type;
+        int num_expected_chunks;
+        uint64_t deadline_ms;
+    } server_stream_state[32];
+    int nb_server_streams;
+    
+    int nb_streams;
+    uint64_t start_time;
+    int test_completed;
+    
+    /* Test scenario info */
+    st_test_api_deadline_stream_desc_t* scenario;
+    size_t nb_scenario;
+    
+    /* Statistics */
+    normal_stream_stats_t* normal_stats[32];
+    deadline_stream_stats_t* deadline_stats[32];
+    
+    /* Callback contexts */
+    test_api_callback_t client_callback;
+    test_api_callback_t server_callback;
+} deadline_api_test_ctx_t;
+
+/* Deadline API test helper functions */
+int deadline_api_init_ctx(picoquic_test_tls_api_ctx_t** p_test_ctx, 
+                         uint64_t* simulated_time,
+                         deadline_api_test_ctx_t** p_deadline_ctx);
+                         
+int deadline_api_callback(picoquic_cnx_t* cnx,
+    uint64_t stream_id, uint8_t* bytes, size_t length,
+    picoquic_call_back_event_t fin_or_event, void* callback_ctx, void* stream_ctx);
+                         
+int deadline_api_data_sending_loop(picoquic_test_tls_api_ctx_t* test_ctx,
+                                  deadline_api_test_ctx_t* deadline_ctx,
+                                  st_test_api_deadline_stream_desc_t* scenario,
+                                  size_t nb_scenario,
+                                  uint64_t* simulated_time);
+
+void deadline_api_delete_test_ctx(deadline_api_test_ctx_t* test_ctx);
+
+int deadline_api_verify(picoquic_test_tls_api_ctx_t* test_ctx,
+                       deadline_api_test_ctx_t* deadline_ctx,
+                       st_test_api_deadline_stream_desc_t* scenario,
+                       size_t nb_scenario);
+
+void deadline_api_calculate_normal_stats(deadline_api_test_ctx_t* deadline_ctx, int stream_idx);
+
+void deadline_api_calculate_deadline_stats(deadline_api_test_ctx_t* deadline_ctx, int stream_idx,
+                                          st_test_api_deadline_stream_desc_t* scenario, size_t nb_scenario);
+
+void deadline_api_print_stats(deadline_api_test_ctx_t* deadline_ctx,
+                             st_test_api_deadline_stream_desc_t* scenario,
+                             size_t nb_scenario);
+
+/* Test scenarios */
+extern st_test_api_deadline_stream_desc_t test_scenario_single_deadline[];
+extern st_test_api_deadline_stream_desc_t test_scenario_mixed_streams[];
+extern st_test_api_deadline_stream_desc_t test_scenario_multiple_deadlines[];
+
+/* Global context */
+extern deadline_api_test_ctx_t* g_deadline_ctx;
+
 #ifdef __cplusplus
 }
 #endif

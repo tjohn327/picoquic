@@ -169,6 +169,7 @@ static const picoquic_test_def_t test_table[] = {
     { "deadline_stream_abort", deadline_stream_abort_test },
     { "deadline_evaluation", deadline_evaluation_test },
     { "multipath_evaluation", multipath_evaluation_test },
+    { "multipath_comprehensive_eval", multipath_comprehensive_eval_test },
     { "tls_api_sni", tls_api_sni_test },
     { "tls_api_alpn", tls_api_alpn_test },
     { "tls_api_wrong_alpn", tls_api_wrong_alpn_test },

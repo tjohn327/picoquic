@@ -511,6 +511,7 @@ int multipath_deadline_test();
 int multipath_deadline_video_test();
 int multipath_deadline_gaming_test();
 int multipath_deadline_iot_test();
+int multipath_comprehensive_eval_test();
 int multipath_backup_test();
 int multipath_standup_test();
 int multipath_discovery_test();

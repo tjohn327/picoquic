@@ -46,8 +46,8 @@ typedef struct st_eval_config_t {
 
 /* Scenario A: Video Conferencing */
 static st_test_api_deadline_stream_desc_t scenario_video_conf[] = {
-    /* Video: 30fps, ~2KB per frame, 100ms deadline */
-    { 2, st_stream_type_deadline, 60000, 2048, 33, 100, 30, 0 },
+    /* Video: 30fps, ~5KB per frame, 100ms deadline */
+    { 2, st_stream_type_deadline, 60000, 5000, 33, 100, 30, 0 },
     /* Audio: 20ms chunks, 160 bytes, 150ms deadline */
     { 6, st_stream_type_deadline, 8000, 160, 20, 150, 50, 0 },
     /* Screen share: larger chunks, 500ms deadline */
@@ -195,6 +195,285 @@ static st_eval_config_t eval_configs[] = {
     { "Gaming_Asym_Vanilla", "gaming", "Asymmetric", 1, 0, 226 },
     { "Gaming_Asym_Deadline", "gaming", "Asymmetric", 1, 1, 227 }
 };
+
+
+// ... existing code ...
+
+/*
+ * Network pattern types for loss simulation
+ */
+typedef enum {
+    picoquic_loss_pattern_uniform = 0,    /* Uniform random loss */
+    picoquic_loss_pattern_wifi,           /* WiFi-like bursty loss */
+    picoquic_loss_pattern_lte,            /* LTE-like periodic loss */
+    picoquic_loss_pattern_wan,            /* WAN-like correlated loss */
+    picoquic_loss_pattern_satellite,      /* Satellite-like long bursts */
+    picoquic_loss_pattern_dsl             /* DSL-like intermittent loss */
+} picoquic_loss_pattern_t;
+
+/*
+ * Convert percentage loss to loss mask with specified network pattern
+ * 
+ * Parameters:
+ * - loss_percent: Loss percentage (0.0 to 100.0)
+ * - pattern: Network pattern type
+ * - random_seed: Seed for reproducible random generation
+ * 
+ * Returns:
+ * - uint64_t loss mask suitable for picoquictest_sim_link_create
+ * 
+ * Network Pattern Characteristics:
+ * - Uniform: Random loss with no correlation
+ * - WiFi: Bursty loss with short bursts (1-3 packets) and longer gaps
+ * - LTE: Periodic loss with regular intervals and short bursts
+ * - WAN: Correlated loss with medium bursts (2-5 packets) and variable gaps
+ * - Satellite: Long bursts (5-15 packets) with very long gaps
+ * - DSL: Intermittent loss with irregular patterns and medium bursts
+ */
+uint64_t picoquic_loss_percent_to_mask(double loss_percent, picoquic_loss_pattern_t pattern, uint64_t random_seed)
+{
+    uint64_t loss_mask = 0;
+    uint64_t random_context = random_seed;
+    
+    /* Validate input */
+    if (loss_percent < 0.0 || loss_percent > 100.0) {
+        return 0; /* No loss for invalid percentages */
+    }
+    
+    if (loss_percent == 0.0) {
+        return 0; /* No loss */
+    }
+    
+    /* Convert percentage to probability (0.0 to 1.0) */
+    double loss_probability = loss_percent / 100.0;
+    
+    /* Calculate target number of loss bits in 64-bit mask */
+    int target_loss_bits = (int)(loss_probability * 64.0 + 0.5);
+    
+    if (target_loss_bits <= 0) {
+        return 0; /* No loss for very small percentages */
+    }
+    
+    if (target_loss_bits >= 64) {
+        return UINT64_MAX; /* All packets lost for very high percentages */
+    }
+    
+    switch (pattern) {
+        case picoquic_loss_pattern_uniform:
+            /* Uniform random loss - distribute loss bits randomly */
+            for (int i = 0; i < 64; i++) {
+                loss_mask <<= 1;
+                if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 1000)) {
+                    loss_mask |= 1;
+                }
+            }
+            break;
+            
+        case picoquic_loss_pattern_wifi:
+            /* WiFi-like pattern: short bursts (1-3 packets) with longer gaps */
+            {
+                int remaining_loss_bits = target_loss_bits;
+                int position = 0;
+                
+                while (remaining_loss_bits > 0 && position < 64) {
+                    /* Decide if this is the start of a burst */
+                    if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 2000)) {
+                        /* Start a burst */
+                        int burst_size = 1 + (picoquic_test_uniform_random(&random_context, 3)); /* 1-3 packets */
+                        burst_size = (burst_size > remaining_loss_bits) ? remaining_loss_bits : burst_size;
+                        
+                        /* Place burst bits */
+                        for (int j = 0; j < burst_size && (position + j) < 64; j++) {
+                            loss_mask |= (1ULL << (63 - position - j));
+                            remaining_loss_bits--;
+                        }
+                        position += burst_size;
+                    } else {
+                        position++;
+                    }
+                }
+            }
+            break;
+            
+        case picoquic_loss_pattern_lte:
+            /* LTE-like pattern: periodic loss with regular intervals */
+            {
+                int remaining_loss_bits = target_loss_bits;
+                int period = 64 / (target_loss_bits + 1); /* Regular spacing */
+                if (period < 2) period = 2;
+                
+                for (int i = 0; i < 64 && remaining_loss_bits > 0; i += period) {
+                    if (remaining_loss_bits > 0) {
+                        loss_mask |= (1ULL << (63 - i));
+                        remaining_loss_bits--;
+                    }
+                }
+                
+                /* Add some randomness to the pattern */
+                uint64_t random_mask = 0;
+                for (int i = 0; i < 64; i++) {
+                    random_mask <<= 1;
+                    if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 500)) {
+                        random_mask |= 1;
+                    }
+                }
+                loss_mask |= random_mask;
+            }
+            break;
+            
+        case picoquic_loss_pattern_wan:
+            /* WAN-like pattern: medium bursts (2-5 packets) with variable gaps */
+            {
+                int remaining_loss_bits = target_loss_bits;
+                int position = 0;
+                
+                while (remaining_loss_bits > 0 && position < 64) {
+                    /* Decide if this is the start of a burst */
+                    if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 1500)) {
+                        /* Start a burst */
+                        int burst_size = 2 + (picoquic_test_uniform_random(&random_context, 4)); /* 2-5 packets */
+                        burst_size = (burst_size > remaining_loss_bits) ? remaining_loss_bits : burst_size;
+                        
+                        /* Place burst bits */
+                        for (int j = 0; j < burst_size && (position + j) < 64; j++) {
+                            loss_mask |= (1ULL << (63 - position - j));
+                            remaining_loss_bits--;
+                        }
+                        position += burst_size;
+                        
+                        /* Add variable gap */
+                        int gap = 3 + (picoquic_test_uniform_random(&random_context, 8)); /* 3-10 packets */
+                        position += gap;
+                    } else {
+                        position++;
+                    }
+                }
+            }
+            break;
+            
+        case picoquic_loss_pattern_satellite:
+            /* Satellite-like pattern: long bursts (5-15 packets) with very long gaps */
+            {
+                int remaining_loss_bits = target_loss_bits;
+                int position = 0;
+                
+                while (remaining_loss_bits > 0 && position < 64) {
+                    /* Decide if this is the start of a burst */
+                    if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 3000)) {
+                        /* Start a long burst */
+                        int burst_size = 5 + (picoquic_test_uniform_random(&random_context, 11)); /* 5-15 packets */
+                        burst_size = (burst_size > remaining_loss_bits) ? remaining_loss_bits : burst_size;
+                        
+                        /* Place burst bits */
+                        for (int j = 0; j < burst_size && (position + j) < 64; j++) {
+                            loss_mask |= (1ULL << (63 - position - j));
+                            remaining_loss_bits--;
+                        }
+                        position += burst_size;
+                        
+                        /* Add very long gap */
+                        int gap = 10 + (picoquic_test_uniform_random(&random_context, 20)); /* 10-30 packets */
+                        position += gap;
+                    } else {
+                        position++;
+                    }
+                }
+            }
+            break;
+            
+        case picoquic_loss_pattern_dsl:
+            /* DSL-like pattern: intermittent loss with irregular patterns */
+            {
+                int remaining_loss_bits = target_loss_bits;
+                int position = 0;
+                
+                while (remaining_loss_bits > 0 && position < 64) {
+                    /* Decide if this is the start of a burst */
+                    if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 1200)) {
+                        /* Start a burst */
+                        int burst_size = 1 + (picoquic_test_uniform_random(&random_context, 4)); /* 1-4 packets */
+                        burst_size = (burst_size > remaining_loss_bits) ? remaining_loss_bits : burst_size;
+                        
+                        /* Place burst bits */
+                        for (int j = 0; j < burst_size && (position + j) < 64; j++) {
+                            loss_mask |= (1ULL << (63 - position - j));
+                            remaining_loss_bits--;
+                        }
+                        position += burst_size;
+                        
+                        /* Add irregular gap */
+                        int gap = 1 + (picoquic_test_uniform_random(&random_context, 15)); /* 1-15 packets */
+                        position += gap;
+                    } else {
+                        position++;
+                    }
+                }
+            }
+            break;
+            
+        default:
+            /* Fall back to uniform pattern */
+            for (int i = 0; i < 64; i++) {
+                loss_mask <<= 1;
+                if (picoquic_test_uniform_random(&random_context, 1000) < (loss_probability * 1000)) {
+                    loss_mask |= 1;
+                }
+            }
+            break;
+    }
+    
+    /* Ensure we don't exceed the target number of loss bits */
+    int actual_loss_bits = 0;
+    uint64_t temp_mask = loss_mask;
+    while (temp_mask != 0) {
+        actual_loss_bits += (temp_mask & 1);
+        temp_mask >>= 1;
+    }
+    
+    /* Adjust if we have too many or too few loss bits */
+    if (actual_loss_bits > target_loss_bits) {
+        /* Remove excess loss bits randomly */
+        int excess = actual_loss_bits - target_loss_bits;
+        for (int i = 0; i < excess; i++) {
+            /* Find a random loss bit and clear it */
+            int attempts = 0;
+            while (attempts < 64) {
+                int bit_pos = picoquic_test_uniform_random(&random_context, 64);
+                if (loss_mask & (1ULL << bit_pos)) {
+                    loss_mask &= ~(1ULL << bit_pos);
+                    break;
+                }
+                attempts++;
+            }
+        }
+    } else if (actual_loss_bits < target_loss_bits) {
+        /* Add missing loss bits randomly */
+        int missing = target_loss_bits - actual_loss_bits;
+        for (int i = 0; i < missing; i++) {
+            /* Find a random non-loss bit and set it */
+            int attempts = 0;
+            while (attempts < 64) {
+                int bit_pos = picoquic_test_uniform_random(&random_context, 64);
+                if (!(loss_mask & (1ULL << bit_pos))) {
+                    loss_mask |= (1ULL << bit_pos);
+                    break;
+                }
+                attempts++;
+            }
+        }
+    }
+    
+    return loss_mask;
+}
+
+/*
+ * Helper function to create a loss mask with default random seed
+ */
+uint64_t picoquic_loss_percent_to_mask_default(double loss_percent, picoquic_loss_pattern_t pattern)
+{
+    return picoquic_loss_percent_to_mask(loss_percent, pattern, 0xDEADBEEFBABAC001ull);
+}
+
 
 /* External functions */
 extern int multipath_deadline_test_one(int scenario, 
@@ -478,17 +757,19 @@ static int multipath_test_with_network(int scenario,
         /* Don't delete default links, just reconfigure them */
         /* The default links were already created by tls_api_init_ctx_ex2 */
 
+        uint64_t loss_mask = picoquic_loss_percent_to_mask_default(path1_config->loss_rate, picoquic_loss_pattern_uniform);
+
         test_ctx->c_to_s_link = picoquictest_sim_link_create(
             path1_config->bandwidth_bps/1000000000.0,
             (uint64_t)(path1_config->delay_sec * 1000000.0),
-            NULL,
+            &loss_mask,
             0,
             0);
 
         test_ctx->s_to_c_link = picoquictest_sim_link_create(
             path1_config->bandwidth_bps/1000000000.0,
             (uint64_t)(path1_config->delay_sec * 1000000.0),
-            NULL,
+            &loss_mask,
             0,
             0);            
     }
@@ -571,17 +852,19 @@ static int multipath_test_with_network(int scenario,
             path2_config->delay_sec * 2000.0,  /* Round trip time */
             path2_config->loss_rate * 100.0);
         
+        uint64_t loss_mask = picoquic_loss_percent_to_mask_default(path2_config->loss_rate, picoquic_loss_pattern_uniform);
+
         /* Create path 2 with config characteristics */
         test_ctx->c_to_s_link_2 = picoquictest_sim_link_create(
             path2_config->bandwidth_bps/1000000000.0,
             (uint64_t)(path2_config->delay_sec * 1000000.0),
-            NULL,
+            &loss_mask,
             0,
             0);
         test_ctx->s_to_c_link_2 = picoquictest_sim_link_create(
             path2_config->bandwidth_bps/1000000000.0,
             (uint64_t)(path2_config->delay_sec * 1000000.0),
-            NULL,
+            &loss_mask,
             0,
             0);
         

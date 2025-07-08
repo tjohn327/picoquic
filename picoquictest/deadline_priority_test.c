@@ -1,7 +1,4 @@
 /*
-* Author: Tony John
-* Copyright (c) 2024
-* 
 * This file implements tests for deadline-aware priority scheduling in picoquic.
 * It verifies that streams with tighter deadlines get higher priority.
 */

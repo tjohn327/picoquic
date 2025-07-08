@@ -1,7 +1,4 @@
 /*
-* Author: Tony John
-* Copyright (c) 2024
-* 
 * This file implements tests for stream abort functionality with deadline-aware streams.
 * It verifies that streams can be properly aborted and that resources are cleaned up.
 */

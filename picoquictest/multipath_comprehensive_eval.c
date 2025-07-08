@@ -142,7 +142,7 @@ static st_eval_config_t eval_configs[] = {
     { "VideoConf_DualWAN_Vanilla", "video_conf", "Dual_WAN", 1, 0, 202 },
     { "VideoConf_DualWAN_Deadline", "video_conf", "Dual_WAN", 1, 1, 203 },
     
-#if 0 /* Comment out remaining tests for now to test basic functionality */
+#if 1 /* Comment out remaining tests for now to test basic functionality */
     { "VideoConf_SatTerr_Vanilla", "video_conf", "Sat_Terrestrial", 1, 0, 204 },
     { "VideoConf_SatTerr_Deadline", "video_conf", "Sat_Terrestrial", 1, 1, 205 },
     { "VideoConf_Asym_Vanilla", "video_conf", "Asymmetric", 1, 0, 206 },
@@ -472,6 +472,26 @@ static int multipath_test_with_network(int scenario,
     if (ret == 0 && test_ctx == NULL) {
         ret = -1;
     }
+
+    /* Configure primary path with custom network characteristics */
+    if (ret == 0 && path1_config != NULL) {
+        /* Don't delete default links, just reconfigure them */
+        /* The default links were already created by tls_api_init_ctx_ex2 */
+
+        test_ctx->c_to_s_link = picoquictest_sim_link_create(
+            path1_config->bandwidth_bps/1000000000.0,
+            (uint64_t)(path1_config->delay_sec * 1000000.0),
+            NULL,
+            0,
+            0);
+
+        test_ctx->s_to_c_link = picoquictest_sim_link_create(
+            path1_config->bandwidth_bps/1000000000.0,
+            (uint64_t)(path1_config->delay_sec * 1000000.0),
+            NULL,
+            0,
+            0);            
+    }
     
     /* Configure transport parameters */
     if (ret == 0) {
@@ -496,20 +516,9 @@ static int multipath_test_with_network(int scenario,
         /* picoquic_set_binlog(test_ctx->qserver, "."); */
         /* test_ctx->qserver->use_long_log = 1; */
     }
+
+
     
-    /* Configure primary path with custom network characteristics */
-    if (ret == 0 && path1_config != NULL) {
-        /* Don't delete default links, just reconfigure them */
-        /* The default links were already created by tls_api_init_ctx_ex2 */
-        
-        /* For now, we'll use the default primary path and only configure the second path */
-        /* This avoids connection establishment issues */
-        DBG_PRINTF("  Path 1 config: %s, BW: %.2f Mbps, RTT: %.0f ms, Loss: %.1f%%\n",
-            path1_config->name,
-            path1_config->bandwidth_bps / 1000000.0,
-            path1_config->delay_sec * 2000.0,  /* Round trip time */
-            path1_config->loss_rate * 100.0);
-    }
     
     /* Initialize deadline context BEFORE establishing connection */
     if (ret == 0) {
@@ -529,6 +538,7 @@ static int multipath_test_with_network(int scenario,
             picoquic_set_callback(test_ctx->cnx_client, deadline_api_callback, &deadline_ctx->client_callback);
         }
     }
+
     
     /* Establish the connection */
     if (ret == 0) {
@@ -563,14 +573,14 @@ static int multipath_test_with_network(int scenario,
         
         /* Create path 2 with config characteristics */
         test_ctx->c_to_s_link_2 = picoquictest_sim_link_create(
-            path2_config->delay_sec,
-            (uint64_t)(path2_config->bandwidth_bps / 8),
+            path2_config->bandwidth_bps/1000000000.0,
+            (uint64_t)(path2_config->delay_sec * 1000000.0),
             NULL,
             0,
             0);
         test_ctx->s_to_c_link_2 = picoquictest_sim_link_create(
-            path2_config->delay_sec,
-            (uint64_t)(path2_config->bandwidth_bps / 8),
+            path2_config->bandwidth_bps/1000000000.0,
+            (uint64_t)(path2_config->delay_sec * 1000000.0),
             NULL,
             0,
             0);

@@ -169,7 +169,6 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/datagram_tests.c
     picoquictest/deadline_api_test.c
     picoquictest/deadline_simple_eval.c
-    picoquictest/multipath_evaluation_test.c
     picoquictest/multipath_comprehensive_eval.c
     picoquictest/deadline_priority_test.c
     picoquictest/deadline_stream_abort_test.c
@@ -188,8 +187,6 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/minicrypto_test.c
     picoquictest/multipath_test.c
     picoquictest/multipath_deadline_test.c
-    picoquictest/simple_multipath_deadline_test.c
-    picoquictest/simple_multipath_test.c
     picoquictest/netperf_test.c
     picoquictest/openssl_test.c
     picoquictest/p2p_test.c

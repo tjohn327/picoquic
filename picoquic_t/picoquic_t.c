@@ -167,6 +167,8 @@ static const picoquic_test_def_t test_table[] = {
     { "deadline_priority_scheduling", deadline_priority_scheduling_test },
     { "deadline_expired_chunk", deadline_expired_chunk_test },
     { "deadline_stream_abort", deadline_stream_abort_test },
+    { "deadline_evaluation", deadline_evaluation_test },
+    { "multipath_evaluation", multipath_evaluation_test },
     { "tls_api_sni", tls_api_sni_test },
     { "tls_api_alpn", tls_api_alpn_test },
     { "tls_api_wrong_alpn", tls_api_wrong_alpn_test },

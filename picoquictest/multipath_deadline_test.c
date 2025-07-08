@@ -102,7 +102,7 @@ static void multipath_test_kill_links(picoquic_test_tls_api_ctx_t* test_ctx, int
 }
 
 /* Helper function to run one multipath deadline test */
-static int multipath_deadline_test_one(int scenario, 
+int multipath_deadline_test_one(int scenario, 
                                       st_test_api_deadline_stream_desc_t* test_scenario,
                                       size_t nb_scenario,
                                       uint64_t max_completion_microsec,
@@ -134,14 +134,18 @@ static int multipath_deadline_test_one(int scenario,
         server_parameters.is_multipath_enabled = 1;
         server_parameters.initial_max_path_id = 2;
         server_parameters.enable_time_stamp = 3;
-        server_parameters.enable_deadline_aware_streams = 1;
+        
+        /* Check if we're running vanilla mode (scenario >= 100) */
+        int is_vanilla = (scenario >= 100 && scenario % 2 == 0);
+        server_parameters.enable_deadline_aware_streams = is_vanilla ? 0 : 1;
+        
         picoquic_set_default_tp(test_ctx->qserver, &server_parameters);
         
         /* Set client transport parameters on the already-created connection */
         test_ctx->cnx_client->local_parameters.enable_time_stamp = 3;
         test_ctx->cnx_client->local_parameters.is_multipath_enabled = 1;
         test_ctx->cnx_client->local_parameters.initial_max_path_id = 2;
-        test_ctx->cnx_client->local_parameters.enable_deadline_aware_streams = 1;
+        test_ctx->cnx_client->local_parameters.enable_deadline_aware_streams = is_vanilla ? 0 : 1;
         
         /* Enable logging */
         picoquic_set_binlog(test_ctx->qserver, ".");
@@ -182,10 +186,22 @@ static int multipath_deadline_test_one(int scenario,
                 test_ctx->cnx_client->is_multipath_enabled, test_ctx->cnx_server->is_multipath_enabled);
             ret = -1;
         }
-        if (!picoquic_is_deadline_aware_negotiated(test_ctx->cnx_client) ||
-            !picoquic_is_deadline_aware_negotiated(test_ctx->cnx_server)) {
-            DBG_PRINTF("%s", "Deadline-aware streams not negotiated\n");
-            ret = -1;
+        /* Check if we're running vanilla mode (scenario >= 100) */
+        int is_vanilla = (scenario >= 100 && scenario % 2 == 0);
+        
+        if (!is_vanilla) {
+            if (!picoquic_is_deadline_aware_negotiated(test_ctx->cnx_client) ||
+                !picoquic_is_deadline_aware_negotiated(test_ctx->cnx_server)) {
+                DBG_PRINTF("%s", "Deadline-aware streams not negotiated\n");
+                ret = -1;
+            }
+        } else {
+            /* For vanilla mode, verify deadline-aware is NOT negotiated */
+            if (picoquic_is_deadline_aware_negotiated(test_ctx->cnx_client) ||
+                picoquic_is_deadline_aware_negotiated(test_ctx->cnx_server)) {
+                DBG_PRINTF("%s", "Deadline-aware streams incorrectly negotiated in vanilla mode\n");
+                ret = -1;
+            }
         }
     }
 
@@ -269,6 +285,28 @@ static int multipath_deadline_test_one(int scenario,
     
     /* Calculate and print statistics */
     if (ret == 0) {
+        /* Check if we're running vanilla mode (scenario >= 100) */
+        int is_vanilla = (scenario >= 100 && scenario % 2 == 0);
+        
+        /* Create a stats scenario that has original deadlines for vanilla mode */
+        st_test_api_deadline_stream_desc_t* stats_scenario = test_scenario;
+        if (is_vanilla) {
+            /* For vanilla mode, use original deadlines for compliance calculation */
+            stats_scenario = (st_test_api_deadline_stream_desc_t*)malloc(
+                nb_scenario * sizeof(st_test_api_deadline_stream_desc_t));
+            if (stats_scenario != NULL) {
+                memcpy(stats_scenario, test_scenario, 
+                       nb_scenario * sizeof(st_test_api_deadline_stream_desc_t));
+                /* Restore original deadlines for stats calculation */
+                for (size_t j = 0; j < nb_scenario; j++) {
+                    if (stats_scenario[j].stream_type == st_stream_type_deadline) {
+                        /* Use hardcoded original deadline of 50ms */
+                        stats_scenario[j].deadline_ms = 50;
+                    }
+                }
+            }
+        }
+        
         for (int i = 0; i < deadline_ctx->nb_streams; i++) {
             int scenario_idx = -1;
             for (size_t j = 0; j < nb_scenario; j++) {
@@ -282,9 +320,15 @@ static int multipath_deadline_test_one(int scenario,
                 if (test_scenario[scenario_idx].stream_type == st_stream_type_normal) {
                     deadline_api_calculate_normal_stats(deadline_ctx, i);
                 } else {
-                    deadline_api_calculate_deadline_stats(deadline_ctx, i, test_scenario, nb_scenario);
+                    /* Use stats_scenario for deadline calculation */
+                    deadline_api_calculate_deadline_stats(deadline_ctx, i, 
+                        stats_scenario ? stats_scenario : test_scenario, nb_scenario);
                 }
             }
+        }
+        
+        if (is_vanilla && stats_scenario != NULL && stats_scenario != test_scenario) {
+            free(stats_scenario);
         }
         
         DBG_PRINTF("%s", "\n========== MULTIPATH DEADLINE TEST RESULTS ==========\n");
@@ -309,15 +353,28 @@ static int multipath_deadline_test_one(int scenario,
     
     /* Verify deadline compliance meets expectations */
     if (ret == 0) {
-        /* For multipath tests, we expect better deadline compliance */
+        /* Check if we're running vanilla mode (scenario >= 100) */
+        int is_vanilla = (scenario >= 100 && scenario % 2 == 0);
+        
+        /* For both vanilla and deadline modes, check compliance */
         for (int i = 0; i < deadline_ctx->nb_streams; i++) {
             if (deadline_ctx->deadline_stats[i] != NULL) {
                 double min_compliance = simulate_path_failure ? 85.0 : 95.0;
-                if (deadline_ctx->deadline_stats[i]->deadline_compliance_percent < min_compliance) {
-                    DBG_PRINTF("Stream %d: Poor deadline compliance %.1f%% < %.1f%%\n",
-                        i, deadline_ctx->deadline_stats[i]->deadline_compliance_percent,
-                        min_compliance);
-                    ret = -1;
+                
+                if (is_vanilla) {
+                    /* For vanilla mode, we're measuring against original deadlines
+                     * so we expect lower compliance since scheduler isn't deadline-aware */
+                    DBG_PRINTF("Stream %d: Vanilla deadline compliance %.1f%% (measured against 50ms deadline)\n",
+                        i, deadline_ctx->deadline_stats[i]->deadline_compliance_percent);
+                    /* Don't fail the test for vanilla mode, just report the compliance */
+                } else {
+                    /* For deadline mode, we expect high compliance */
+                    if (deadline_ctx->deadline_stats[i]->deadline_compliance_percent < min_compliance) {
+                        DBG_PRINTF("Stream %d: Poor deadline compliance %.1f%% < %.1f%%\n",
+                            i, deadline_ctx->deadline_stats[i]->deadline_compliance_percent,
+                            min_compliance);
+                        ret = -1;
+                    }
                 }
             }
         }

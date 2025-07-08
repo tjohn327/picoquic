@@ -599,6 +599,8 @@ int deadline_api_test_multiple_deadlines();
 int deadline_priority_scheduling_test();
 int deadline_expired_chunk_test();
 int deadline_stream_abort_test();
+int deadline_evaluation_test();
+int multipath_evaluation_test();
 int cplusplustest();
 
 #ifdef __cplusplus

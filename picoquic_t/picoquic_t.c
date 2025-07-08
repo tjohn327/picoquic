@@ -480,6 +480,7 @@ static const picoquic_test_def_t test_table[] = {
     { "monopath_0rtt_loss", monopath_0rtt_loss_test },
     { "multipath_aead", multipath_aead_test },
     { "multipath_basic", multipath_basic_test },
+    { "simple_multipath", simple_multipath_test },
     { "multipath_drop_first", multipath_drop_first_test },
     { "multipath_drop_second", multipath_drop_second_test },
     { "multipath_fail", multipath_fail_test },

@@ -1342,6 +1342,7 @@ typedef struct st_picoquic_cnx_t {
     unsigned int is_subscribed_to_path_allowed : 1; /* application wants to be advised if it is now possible to create a path */
     unsigned int is_notified_that_path_is_allowed : 1; /* application wants to be advised if it is now possible to create a path */
     unsigned int enable_deadline_aware_streams : 1; /* DMTP: deadline-aware streams negotiated */
+    unsigned int is_bbr_required : 1; /* BBR congestion control should be enforced after handshake */
     
     /* PMTUD policy */
     picoquic_pmtud_policy_enum pmtud_policy;

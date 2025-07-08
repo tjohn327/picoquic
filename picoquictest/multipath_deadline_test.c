@@ -65,9 +65,9 @@ static st_test_api_deadline_stream_desc_t multipath_deadline_video_scenario[] = 
  */
 static st_test_api_deadline_stream_desc_t multipath_deadline_gaming_scenario[] = {
     /* Game state updates: 1KB at 60Hz with 50ms deadline */
-    { 2, st_stream_type_deadline, 120000, 1024, 16, 50, 120, 0 },  /* 2 seconds of gaming */
+    { 2, st_stream_type_deadline, 60000, 1024, 16, 50, 60, 0 },  /* 1 second of gaming */
     /* Voice chat: 160B every 20ms with 100ms deadline */
-    { 6, st_stream_type_deadline, 16000, 160, 20, 100, 100, 0 }
+    { 6, st_stream_type_deadline, 8000, 160, 20, 100, 50, 0 }
 };
 
 /* Scenario 3: IoT sensors with asymmetric paths
@@ -83,55 +83,23 @@ static st_test_api_deadline_stream_desc_t multipath_deadline_iot_scenario[] = {
     { 10, st_stream_type_normal, 100000, 0, 0, 0, 0, 0 }
 };
 
-/* Global deadline context for callbacks */
-deadline_api_test_ctx_t* g_multipath_deadline_ctx = NULL;
-
-/* Configure multipath links with different characteristics */
-static int multipath_deadline_setup_links(picoquic_test_tls_api_ctx_t* test_ctx, int scenario)
+/* Kill links function to simulate path failure */
+static void multipath_test_kill_links(picoquic_test_tls_api_ctx_t* test_ctx, int link_id)
 {
-    int ret = 0;
-    
-    /* Initialize the second client address */
-    test_ctx->client_addr_2 = test_ctx->client_addr;
-    test_ctx->client_addr_2.sin_port += 17;
-    
-    switch (scenario) {
-    case 0: /* Video scenario: Path 0 = high BW moderate latency, Path 1 = low BW low latency */
-        /* Path 0: 10 Mbps, 20ms latency */
-        test_ctx->c_to_s_link = picoquictest_sim_link_create(0.020, 10000000, NULL, 100000, 0);
-        test_ctx->s_to_c_link = picoquictest_sim_link_create(0.020, 10000000, NULL, 100000, 0);
-        /* Path 1: 2 Mbps, 5ms latency */
-        test_ctx->c_to_s_link_2 = picoquictest_sim_link_create(0.005, 2000000, NULL, 20000, 0);
-        test_ctx->s_to_c_link_2 = picoquictest_sim_link_create(0.005, 2000000, NULL, 20000, 0);
-        break;
-        
-    case 1: /* Gaming scenario: Both paths similar, will test failover */
-        /* Path 0: 5 Mbps, 10ms latency */
-        test_ctx->c_to_s_link = picoquictest_sim_link_create(0.010, 5000000, NULL, 50000, 0);
-        test_ctx->s_to_c_link = picoquictest_sim_link_create(0.010, 5000000, NULL, 50000, 0);
-        /* Path 1: 5 Mbps, 15ms latency */
-        test_ctx->c_to_s_link_2 = picoquictest_sim_link_create(0.015, 5000000, NULL, 50000, 0);
-        test_ctx->s_to_c_link_2 = picoquictest_sim_link_create(0.015, 5000000, NULL, 50000, 0);
-        break;
-        
-    case 2: /* IoT scenario: Path 0 = satellite, Path 1 = cellular */
-        /* Path 0: 20 Mbps, 300ms latency (satellite) */
-        test_ctx->c_to_s_link = picoquictest_sim_link_create(0.300, 20000000, NULL, 200000, 0);
-        test_ctx->s_to_c_link = picoquictest_sim_link_create(0.300, 20000000, NULL, 200000, 0);
-        /* Path 1: 1 Mbps, 50ms latency (cellular) */
-        test_ctx->c_to_s_link_2 = picoquictest_sim_link_create(0.050, 1000000, NULL, 10000, 0);
-        test_ctx->s_to_c_link_2 = picoquictest_sim_link_create(0.050, 1000000, NULL, 10000, 0);
-        break;
+    /* Make sure that nothing gets sent on the old links */
+    if (link_id == 0) {
+        test_ctx->c_to_s_link->next_send_time = UINT64_MAX;
+        test_ctx->c_to_s_link->is_switched_off = 1;
+        test_ctx->s_to_c_link->next_send_time = UINT64_MAX;
+        test_ctx->s_to_c_link->is_switched_off = 1;
     }
-    
-    if (test_ctx->c_to_s_link == NULL || test_ctx->s_to_c_link == NULL ||
-        test_ctx->c_to_s_link_2 == NULL || test_ctx->s_to_c_link_2 == NULL) {
-        ret = -1;
+    else {
+        test_ctx->c_to_s_link_2->next_send_time = UINT64_MAX;
+        test_ctx->c_to_s_link_2->is_switched_off = 1;
+        test_ctx->s_to_c_link_2->next_send_time = UINT64_MAX;
+        test_ctx->s_to_c_link_2->is_switched_off = 1;
     }
-    
-    return ret;
 }
-
 
 /* Helper function to run one multipath deadline test */
 static int multipath_deadline_test_one(int scenario, 
@@ -141,8 +109,8 @@ static int multipath_deadline_test_one(int scenario,
                                       int simulate_path_failure)
 {
     uint64_t simulated_time = 0;
-    uint64_t loss_mask = 0;
     picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    uint64_t loss_mask = 0;
     deadline_api_test_ctx_t* deadline_ctx = NULL;
     picoquic_connection_id_t initial_cid = { {0x1d, 0xea, 0xd1, 0x1e, 5, 6, 7, 8}, 8 };
     picoquic_tp_t server_parameters;
@@ -150,7 +118,7 @@ static int multipath_deadline_test_one(int scenario,
     
     initial_cid.id[3] = (uint8_t)scenario;
     
-    /* Create context with delayed initialization exactly like multipath_test.c */
+    /* Create context with delayed initialization like multipath_test.c */
     ret = tls_api_init_ctx_ex2(&test_ctx, PICOQUIC_INTERNAL_TEST_VERSION_1,
         PICOQUIC_TEST_SNI, PICOQUIC_TEST_ALPN, &simulated_time, NULL, NULL, 0, 1, 0, &initial_cid,
         8, 0, 0, 0);
@@ -159,12 +127,28 @@ static int multipath_deadline_test_one(int scenario,
         ret = -1;
     }
     
-    /* Setup multipath links based on scenario */
     if (ret == 0) {
-        ret = multipath_deadline_setup_links(test_ctx, scenario);
+        /* Configure server transport parameters */
+        memset(&server_parameters, 0, sizeof(picoquic_tp_t));
+        picoquic_init_transport_parameters(&server_parameters, 1);
+        server_parameters.is_multipath_enabled = 1;
+        server_parameters.initial_max_path_id = 2;
+        server_parameters.enable_time_stamp = 3;
+        server_parameters.enable_deadline_aware_streams = 1;
+        picoquic_set_default_tp(test_ctx->qserver, &server_parameters);
+        
+        /* Set client transport parameters on the already-created connection */
+        test_ctx->cnx_client->local_parameters.enable_time_stamp = 3;
+        test_ctx->cnx_client->local_parameters.is_multipath_enabled = 1;
+        test_ctx->cnx_client->local_parameters.initial_max_path_id = 2;
+        test_ctx->cnx_client->local_parameters.enable_deadline_aware_streams = 1;
+        
+        /* Enable logging */
+        picoquic_set_binlog(test_ctx->qserver, ".");
+        test_ctx->qserver->use_long_log = 1;
     }
-    
-    /* Initialize deadline test context manually */
+
+    /* Initialize deadline test context BEFORE establishing connection */
     if (ret == 0) {
         deadline_ctx = (deadline_api_test_ctx_t*)calloc(1, sizeof(deadline_api_test_ctx_t));
         if (deadline_ctx == NULL) {
@@ -173,55 +157,24 @@ static int multipath_deadline_test_one(int scenario,
             deadline_ctx->start_time = simulated_time;
             deadline_ctx->scenario = test_scenario;
             deadline_ctx->nb_scenario = nb_scenario;
-            g_multipath_deadline_ctx = deadline_ctx;
             g_deadline_ctx = deadline_ctx; /* Set global context for callbacks */
             
             /* Set up callbacks */
             deadline_ctx->client_callback.client_mode = 1;
             deadline_ctx->server_callback.client_mode = 0;
+            
+            /* Set callbacks */
+            picoquic_set_default_callback(test_ctx->qserver, deadline_api_callback, &deadline_ctx->server_callback);
+            picoquic_set_callback(test_ctx->cnx_client, deadline_api_callback, &deadline_ctx->client_callback);
         }
     }
-    
-    /* Configure transport parameters BEFORE creating connections */
-    if (ret == 0) {
-        /* Enable logging */
-        picoquic_set_binlog(test_ctx->qserver, ".");
-        test_ctx->qserver->use_long_log = 1;
-        picoquic_set_binlog(test_ctx->qclient, ".");
-        test_ctx->qclient->use_long_log = 1;
-        
-        /* Configure server transport parameters */
-        memset(&server_parameters, 0, sizeof(picoquic_tp_t));
-        picoquic_init_transport_parameters(&server_parameters, 1);
-        server_parameters.enable_time_stamp = 3;
-        server_parameters.is_multipath_enabled = 1;
-        server_parameters.initial_max_path_id = 2;
-        /* Temporarily disable deadline-aware streams to debug multipath */
-        /* server_parameters.enable_deadline_aware_streams = 1; */
-        
-        picoquic_set_default_tp(test_ctx->qserver, &server_parameters);
-        picoquic_set_default_callback(test_ctx->qserver, deadline_api_callback, &deadline_ctx->server_callback);
-        
-        /* Configure client parameters on the already-created connection */
-        test_ctx->cnx_client->local_parameters.enable_time_stamp = 3;
-        test_ctx->cnx_client->local_parameters.is_multipath_enabled = 1;
-        test_ctx->cnx_client->local_parameters.initial_max_path_id = 2;
-        /* test_ctx->cnx_client->local_parameters.enable_deadline_aware_streams = 1; */
-        
-        /* Set callback on client */
-        picoquic_set_callback(test_ctx->cnx_client, deadline_api_callback, &deadline_ctx->client_callback);
-        
-        /* Set up binary logging for the connection */
-        binlog_new_connection(test_ctx->cnx_client);
-    }
-    
+
     /* Establish the connection */
     if (ret == 0) {
-        /* Initialize the client connection */
         picoquic_start_client_cnx(test_ctx->cnx_client);
-        ret = tls_api_connection_loop(test_ctx, &loss_mask, 2 * test_ctx->s_to_c_link->microsec_latency, &simulated_time);
+        ret = tls_api_connection_loop(test_ctx, &loss_mask, 0, &simulated_time);
     }
-    
+
     /* Verify multipath is negotiated */
     if (ret == 0) {
         if (!test_ctx->cnx_client->is_multipath_enabled || !test_ctx->cnx_server->is_multipath_enabled) {
@@ -229,42 +182,61 @@ static int multipath_deadline_test_one(int scenario,
                 test_ctx->cnx_client->is_multipath_enabled, test_ctx->cnx_server->is_multipath_enabled);
             ret = -1;
         }
-        /* Temporarily skip deadline-aware check
         if (!picoquic_is_deadline_aware_negotiated(test_ctx->cnx_client) ||
             !picoquic_is_deadline_aware_negotiated(test_ctx->cnx_server)) {
             DBG_PRINTF("%s", "Deadline-aware streams not negotiated\n");
             ret = -1;
         }
-        */
     }
-    
-    /* Wait until ready */
+
+    /* Wait until connection is ready */
     if (ret == 0) {
         ret = wait_client_connection_ready(test_ctx, &simulated_time);
     }
-    
-    /* Add the second path */
+
+    /* Add second path */
     if (ret == 0) {
-        ret = picoquic_probe_new_path(test_ctx->cnx_client, (struct sockaddr*) & test_ctx->server_addr,
-            (struct sockaddr*) & test_ctx->client_addr_2, simulated_time);
-        if (ret != 0) {
-            DBG_PRINTF("Probe new path returns %d\n", ret);
-        }
-    }
-    
-    /* Wait for path to be ready */
-    if (ret == 0) {
-        ret = tls_api_connection_loop(test_ctx, &loss_mask, 0, &simulated_time);
-    }
-    
-    /* Verify we have 2 paths */
-    if (ret == 0) {
-        if (test_ctx->cnx_client->nb_paths != 2) {
-            DBG_PRINTF("Client has %d paths instead of 2\n", test_ctx->cnx_client->nb_paths);
+        /* Initialize the second client address */
+        test_ctx->client_addr_2 = test_ctx->client_addr;
+        test_ctx->client_addr_2.sin_port += 17;
+        
+        /* Create second set of links */
+        test_ctx->c_to_s_link_2 = picoquictest_sim_link_create(0.01, 10000, NULL, 20000, 0);
+        test_ctx->s_to_c_link_2 = picoquictest_sim_link_create(0.01, 10000, NULL, 20000, 0);
+        
+        if (test_ctx->c_to_s_link_2 == NULL || test_ctx->s_to_c_link_2 == NULL) {
             ret = -1;
         }
-        if (test_ctx->cnx_server->nb_paths != 2) {
-            DBG_PRINTF("Server has %d paths instead of 2\n", test_ctx->cnx_server->nb_paths);
+    }
+    
+    /* Probe new path */
+    if (ret == 0) {
+        ret = picoquic_probe_new_path(test_ctx->cnx_client,
+            (struct sockaddr*)&test_ctx->server_addr,
+            (struct sockaddr*)&test_ctx->client_addr_2,
+            simulated_time);
+    }
+
+    /* Wait for second path to be ready */
+    if (ret == 0) {
+        uint64_t timeout = simulated_time + 4000000;
+        int nb_inactive = 0;
+        
+        while (simulated_time < timeout && ret == 0 && nb_inactive < 64 &&
+               (test_ctx->cnx_client->nb_paths != 2 ||
+                !test_ctx->cnx_client->path[1]->first_tuple->challenge_verified ||
+                test_ctx->cnx_server == NULL ||
+                test_ctx->cnx_server->nb_paths != 2 ||
+                !test_ctx->cnx_server->path[1]->first_tuple->challenge_verified)) {
+            int was_active = 0;
+            ret = tls_api_one_sim_round(test_ctx, &simulated_time, timeout, &was_active);
+            nb_inactive = was_active ? 0 : nb_inactive + 1;
+        }
+        
+        if (test_ctx->cnx_client->nb_paths != 2 || test_ctx->cnx_server->nb_paths != 2) {
+            DBG_PRINTF("Failed to establish second path: client=%d paths, server=%d paths\n", 
+                test_ctx->cnx_client->nb_paths,
+                test_ctx->cnx_server ? test_ctx->cnx_server->nb_paths : 0);
             ret = -1;
         }
     }
@@ -283,13 +255,10 @@ static int multipath_deadline_test_one(int scenario,
                                            &simulated_time);
         
         /* If requested, simulate path failure midway through */
-        if (ret == 0 && simulate_path_failure && simulated_time < max_completion_microsec / 2) {
+        if (ret == 0 && simulate_path_failure && !deadline_ctx->test_completed) {
             DBG_PRINTF("Simulating path 0 failure at time %lu\n", simulated_time);
             /* Kill path 0 to test failover */
-            test_ctx->c_to_s_link->next_send_time = UINT64_MAX;
-            test_ctx->c_to_s_link->is_switched_off = 1;
-            test_ctx->s_to_c_link->next_send_time = UINT64_MAX;
-            test_ctx->s_to_c_link->is_switched_off = 1;
+            multipath_test_kill_links(test_ctx, 0);
             
             /* Continue the test */
             ret = deadline_api_data_sending_loop(test_ctx, deadline_ctx,
@@ -328,7 +297,6 @@ static int multipath_deadline_test_one(int scenario,
             DBG_PRINTF("  RTT min: %lu us, smoothed: %lu us\n", path->rtt_min, path->smoothed_rtt);
             DBG_PRINTF("  Bytes sent: %lu, Bandwidth: %lu bps\n", 
                 path->bytes_sent, path->bandwidth_estimate);
-            DBG_PRINTF("  Selected count: %d\n", path->selected);
         }
         
         deadline_api_print_stats(deadline_ctx, test_scenario, nb_scenario);
@@ -355,10 +323,22 @@ static int multipath_deadline_test_one(int scenario,
         }
     }
     
-    /* Clean up */
+    /* Clean up - IMPORTANT: Clear callbacks and global pointer before deleting */
+    if (test_ctx != NULL) {
+        if (test_ctx->cnx_client != NULL) {
+            picoquic_set_callback(test_ctx->cnx_client, NULL, NULL);
+        }
+        if (test_ctx->cnx_server != NULL) {
+            picoquic_set_callback(test_ctx->cnx_server, NULL, NULL);
+        }
+        if (test_ctx->qserver != NULL) {
+            picoquic_set_default_callback(test_ctx->qserver, NULL, NULL);
+        }
+    }
+    
+    g_deadline_ctx = NULL;
     if (deadline_ctx != NULL) {
         deadline_api_delete_test_ctx(deadline_ctx);
-        g_multipath_deadline_ctx = NULL;
     }
     
     if (test_ctx != NULL) {

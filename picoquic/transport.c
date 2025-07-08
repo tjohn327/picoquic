@@ -994,10 +994,12 @@ int picoquic_receive_transport_extensions(picoquic_cnx_t* cnx, int extension_mod
         cnx->local_parameters.min_ack_delay = 0;
     }
 
-    /* If deadline-aware streams are negotiated, enforce BBR congestion control */
+    /* If deadline-aware streams are negotiated, mark for BBR enforcement later */
     if (picoquic_is_deadline_aware_negotiated(cnx)) {
-        picoquic_set_congestion_algorithm(cnx, picoquic_bbr_algorithm);
-        DBG_PRINTF("%s:%u:%s: DMTP negotiated, enforcing BBR congestion control\n", 
+        /* Don't change congestion control during transport parameter processing
+         * as it may disrupt the handshake. Mark for later processing. */
+        cnx->is_bbr_required = 1;
+        DBG_PRINTF("%s:%u:%s: DMTP negotiated, marking for BBR congestion control\n", 
                    __FILE__, __LINE__, __func__);
     }
 

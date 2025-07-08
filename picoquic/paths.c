@@ -580,39 +580,39 @@ void picoquic_sort_available_paths(picoquic_cnx_t* cnx, uint64_t current_time, u
         }
     }
 
-    /* Check if we have a deadline-aware stream to send */
-    if (next_stream != NULL && next_stream->deadline_ms > 0 && picoquic_is_deadline_aware_negotiated(cnx)) {
-        /* Calculate absolute deadline from relative deadline */
-        uint64_t deadline_absolute = next_stream->last_time_data_sent + (next_stream->deadline_ms * 1000);
-        picoquic_path_t* deadline_path = picoquic_select_path_for_deadline(cnx, deadline_absolute, current_time);
+    // /* Check if we have a deadline-aware stream to send */
+    // if (next_stream != NULL && next_stream->deadline_ms > 0 && picoquic_is_deadline_aware_negotiated(cnx)) {
+    //     /* Calculate absolute deadline from relative deadline */
+    //     uint64_t deadline_absolute = next_stream->last_time_data_sent + (next_stream->deadline_ms * 1000);
+    //     picoquic_path_t* deadline_path = picoquic_select_path_for_deadline(cnx, deadline_absolute, current_time);
         
-        if (deadline_path != NULL) {
-            /* Check if deadline path is ready (pacing and congestion) */
-            int deadline_path_index = -1;
-            for (int i = 0; i < cnx->nb_paths; i++) {
-                if (cnx->path[i] == deadline_path) {
-                    deadline_path_index = i;
-                    break;
-                }
-            }
+    //     if (deadline_path != NULL) {
+    //         /* Check if deadline path is ready (pacing and congestion) */
+    //         int deadline_path_index = -1;
+    //         for (int i = 0; i < cnx->nb_paths; i++) {
+    //             if (cnx->path[i] == deadline_path) {
+    //                 deadline_path_index = i;
+    //                 break;
+    //             }
+    //         }
             
-            if (deadline_path_index >= 0 && 
-                (deadline_path_index == data_path_cwin || deadline_path_index == data_path_pacing)) {
-                /* Deadline path is ready, use it */
-                *next_path = deadline_path;
-                DBG_PRINTF("%s:%u:%s: Using deadline-aware path selection for stream %lu\n",
-                           __FILE__, __LINE__, __func__, next_stream->stream_id);
-            }
-            else {
-                /* Deadline path not ready, fall through to normal selection */
-                DBG_PRINTF("%s:%u:%s: Deadline path not ready for stream %lu\n",
-                           __FILE__, __LINE__, __func__, next_stream->stream_id);
-            }
-        }
-    }
+    //         if (deadline_path_index >= 0 && 
+    //             (deadline_path_index == data_path_cwin || deadline_path_index == data_path_pacing)) {
+    //             /* Deadline path is ready, use it */
+    //             *next_path = deadline_path;
+    //             DBG_PRINTF("%s:%u:%s: Using deadline-aware path selection for stream %lu\n",
+    //                        __FILE__, __LINE__, __func__, next_stream->stream_id);
+    //         }
+    //         else {
+    //             /* Deadline path not ready, fall through to normal selection */
+    //             DBG_PRINTF("%s:%u:%s: Deadline path not ready for stream %lu\n",
+    //                        __FILE__, __LINE__, __func__, next_stream->stream_id);
+    //         }
+    //     }
+    // }
     
-    /* If no deadline path was selected, use normal path selection */
-    if (*next_path == NULL) {
+    // /* If no deadline path was selected, use normal path selection */
+    // if (*next_path == NULL) {
         if (is_ack_needed && is_min_rtt_pacing_ok) {
             *next_path = cnx->path[i_min_rtt];
         }
@@ -638,7 +638,7 @@ void picoquic_sort_available_paths(picoquic_cnx_t* cnx, uint64_t current_time, u
             }
             *next_path = cnx->path[0];
         }
-    }
+    // }
     
     (*next_path)->selected++;
     *next_tuple = (*next_path)->first_tuple;

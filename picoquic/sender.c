@@ -21,6 +21,7 @@
 
 #include "picoquic_internal.h"
 #include "picoquic_unified_log.h"
+#include "picoquic_bbr.h"
 #include "tls_api.h"
 #include <stdlib.h>
 #include <string.h>
@@ -2860,6 +2861,14 @@ void picoquic_ready_state_transition(picoquic_cnx_t* cnx, uint64_t current_time)
     cnx->is_handshake_finished = 1;
     picoquic_implicit_handshake_ack(cnx, picoquic_packet_context_initial, current_time);
     picoquic_implicit_handshake_ack(cnx, picoquic_packet_context_handshake, current_time);
+    
+    /* If BBR was marked as required during transport parameter negotiation, enforce it now */
+    if (cnx->is_bbr_required) {
+        picoquic_set_congestion_algorithm(cnx, picoquic_bbr_algorithm);
+        cnx->is_bbr_required = 0;
+        DBG_PRINTF("%s:%u:%s: Enforcing BBR congestion control after handshake\n", 
+                   __FILE__, __LINE__, __func__);
+    }
 
     (void)picoquic_register_net_secret(cnx);
     if (!cnx->quic->use_predictable_random) {

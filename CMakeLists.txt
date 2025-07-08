@@ -185,6 +185,8 @@ set(PICOQUIC_TEST_LIBRARY_FILES
     picoquictest/minicrypto_test.c
     picoquictest/multipath_test.c
     picoquictest/multipath_deadline_test.c
+    picoquictest/simple_multipath_deadline_test.c
+    picoquictest/simple_multipath_test.c
     picoquictest/netperf_test.c
     picoquictest/openssl_test.c
     picoquictest/p2p_test.c

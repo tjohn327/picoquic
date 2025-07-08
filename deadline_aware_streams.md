@@ -85,8 +85,6 @@ The receiver is notified through the standard stream reset callback, enabling ap
 
 ## API Design
 
-The API maintains consistency with picoquic conventions while introducing deadline support:
-
 ```c
 /* Create a new deadline-aware stream */
 uint64_t picoquic_create_deadline_stream(

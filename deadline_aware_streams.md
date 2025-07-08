@@ -133,20 +133,25 @@ The implementation currently employs the following heuristics:
 
 A comprehensive evaluation [framework](picoquictest/multipath_comprehensive_eval.c) validates performance across real-world scenarios using picoquic's simulation framework.
 
-### Gaming (50ms deadlines)
-- **Vanilla QUIC**: 90% compliance, 35.8ms average latency
-- **DMTP**: 100% compliance, 18.5ms average latency
-- **Improvement**: 48% latency reduction
+The evaluation harness extends `picoquictest` with 40 distinct test cases (5 application scenarios × 4 multipath configurations × vanilla vs deadline‑aware). Each run produces a csv file with the following metrics:
 
-### Video Conferencing (100ms deadlines)
-- **Vanilla QUIC**: 75% compliance, 440ms average latency
-- **DMTP**: 75% compliance, 432ms average latency  
-- **Improvement**: Modest gains, network was bottleneck
+* **Deadline compliance** (% of chunks delivered before their deadline)
+* **End‑to‑end latency** (95th‑percentile one‑way delay)
+* **Throughput** and **per‑path utilisation**
 
-### Live Streaming (200ms deadlines)
-- **Vanilla QUIC**: 68.5% compliance
-- **DMTP**: 77.9% compliance
-- **Improvement**: 9.4 percentage points better compliance
+### Highlights
+
+| Metric                    | Aggregate result              |
+| ------------------------- | ----------------------------- |
+| Average compliance uplift | **+18 pp** across the matrix  |
+| Median latency change     | **–1.2 ms** (lower is better) |
+| Throughput impact         | **±0.01 Mbps** (negligible)   |
+
+**Largest wins**
+
+* **Live‑stream + Asymmetric** – +88 pp compliance, –35 ms tail latency.
+* **Video‑conf + Asymmetric** – +60 pp compliance; conversation retains interactivity under congestion.
+* **Mixed‑media + Sat/Terrestrial** – +50 pp compliance, –14 ms jitter on interactive flows.
 
 ## Current Limitations and Mitigation Strategies
 

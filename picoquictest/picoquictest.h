@@ -487,7 +487,6 @@ int monopath_0rtt_test();
 int monopath_0rtt_loss_test();
 int multipath_aead_test();
 int multipath_basic_test();
-int simple_multipath_test();
 int multipath_fail_test();
 int multipath_ab1_test();
 int multipath_drop_first_test();
@@ -601,7 +600,6 @@ int deadline_priority_scheduling_test();
 int deadline_expired_chunk_test();
 int deadline_stream_abort_test();
 int deadline_evaluation_test();
-int multipath_evaluation_test();
 int cplusplustest();
 
 #ifdef __cplusplus
